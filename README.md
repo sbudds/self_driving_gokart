@@ -59,7 +59,7 @@ The RC car leverages the following components:
 ### 4. Running the System
 1. Start the Python script on the Raspberry Pi to begin video processing and detection.
    ```bash
-   python3 stop_sign_detection.py
+   python3 main_detection.py
    ```
 2. The Raspberry Pi will detect stop signs and send a `STOP` command to the Arduino via serial communication.
 
