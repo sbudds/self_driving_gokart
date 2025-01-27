@@ -29,6 +29,8 @@ void loop() {
       digitalWrite(IN2, LOW);
       analogWrite(EN, 0); // Disable motor
 
+    }
+
       Serial.println("Motor stopped");
       
       if (command == "GO") {
