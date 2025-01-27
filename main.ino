@@ -15,7 +15,7 @@ void setup() {
   // Start motor by default (forward direction)
   digitalWrite(IN1, HIGH);
   digitalWrite(IN2, LOW);
-  analogWrite(EN, 255); // Full speed
+  analogWrite(EN, 200); // Speed ranges from 0-255
 }
 
 void loop() {
@@ -30,7 +30,12 @@ void loop() {
       analogWrite(EN, 0); // Disable motor
 
       Serial.println("Motor stopped");
-
+      
+      if (command == "GO") {
+        // Start the motor
+        digitalWrite(IN1, HIGH);
+        digitalWrite(IN2, LOW);
+        analogWrite(EN, 200); 
 
     }
   }
