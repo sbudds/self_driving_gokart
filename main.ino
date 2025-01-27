@@ -1,6 +1,6 @@
 // Define motor control pins
-const int EN = 9;  // Enable pin for motor
-const int IN1 = 7; // Input 1 for motor
+const int EN = 10;  // Enable pin for motor
+const int IN1 = 9; // Input 1 for motor
 const int IN2 = 8; // Input 2 for motor
 
 void setup() {
