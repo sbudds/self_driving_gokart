@@ -15,7 +15,7 @@ void setup() {
   // Start motor by default (forward direction)
   digitalWrite(IN1, HIGH);
   digitalWrite(IN2, LOW);
-  analogWrite(EN, 200); // Speed ranges from 0-255
+  analogWrite(EN, 255); // Speed ranges from 0-255
 }
 
 void loop() {
@@ -37,7 +37,7 @@ void loop() {
         // Start the motor
         digitalWrite(IN1, HIGH);
         digitalWrite(IN2, LOW);
-        analogWrite(EN, 200); 
+        analogWrite(EN, 255); 
 
     }
   }
