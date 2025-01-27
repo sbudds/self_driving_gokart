@@ -4,8 +4,8 @@ import serial
 import time
 
 # Initialize the Arduino serial connection
-# Replace 'COM_PORT' with the appropriate port (e.g., 'COM3' on Windows or '/dev/ttyUSB0' on Linux)
-SERIAL_PORT = 'COM_PORT'
+# Replace 'dev/tty/ACM0' with the appropriate port (e.g., 'COM3' on Windows or '/dev/ttyUSB0' on Linux)
+SERIAL_PORT = 'dev/tty/ACM0'
 BAUD_RATE = 9600
 
 try:
@@ -46,6 +46,14 @@ def detect_stop_signs(frame):
                 try:
                     arduino.write(b'STOP\n')  # Replace 'STOP' with the desired signal
                     print("Signal sent to Arduino: STOP")
+
+                    # Wait for 4 seconds (simulate waiting at the stop sign)
+                    time.sleep(4)
+
+                    # Send signal to resume movement (replace 'GO' with the signal your system uses)
+                    arduino.write(b'GO\n')
+                    print("Signal sent to Arduino: GO")
+
                 except Exception as e:
                     print(f"Error sending signal to Arduino: {e}")
 
