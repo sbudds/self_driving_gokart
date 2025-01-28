@@ -61,7 +61,7 @@ def calculate_steering(height, width, left_line):
     deviation = lane_center - center_x
 
     angle = 105 + (deviation / center_x) * 25  # Steering adjustment
-    angle = max(80, min(130, angle))  # Clamp the angle
+    angle = max(80, min(130, angle)) 
     return int(angle)
 
 def process_frame(frame):
