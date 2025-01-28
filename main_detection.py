@@ -41,7 +41,7 @@ def average_slope_intercept(lines):
         for x1, y1, x2, y2 in line:
             slope = (y2 - y1) / (x2 - x1)
             intercept = y1 - slope * x1
-            if slope < 0:  # Negative slope -> left line
+            if slope > 0:  # Negative slope -> left line
                 left_lines.append((slope, intercept))
             else:          # Positive slope -> right line
                 right_lines.append((slope, intercept))
