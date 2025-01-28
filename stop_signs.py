@@ -5,7 +5,7 @@ import serial
 import time
 
 # Initialize the Arduino serial connection
-# Replace '/dev/ttyACM0' with the appropriate port (e.g., 'COM3' on Windows or '/dev/ttyUSB0' on Linux)
+# Replace '/dev/ttyACM0' with the appropriate port
 SERIAL_PORT = '/dev/ttyACM0'
 BAUD_RATE = 9600
 
