@@ -4,7 +4,7 @@ import serial
 import time
 
 # Initialize the serial connection to Arduino
-arduino = serial.Serial('/dev/ttyUSB0', 9600)  # Replace with your Arduino's serial port
+arduino = serial.Serial('/dev/ttyACM0', 9600)  # Replace with your Arduino's serial port
 time.sleep(2)  # Wait for the connection to initialize
 
 def region_of_interest(img, vertices):
