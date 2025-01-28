@@ -3,7 +3,7 @@
 Servo steeringServo;
 
 void setup() {
-  steeringServo.attach(9); // Connect the servo signal pin to pin 9
+  steeringServo.attach(11); // Connect the servo signal pin to pin 9
   Serial.begin(9600);
 }
 
