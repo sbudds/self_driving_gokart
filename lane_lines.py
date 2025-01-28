@@ -1,8 +1,8 @@
-# Note: This program ONLY detects and reacts to stop signs. Use main_detection.py for both lane line and stop sign reaction.
 import cv2
 import numpy as np
 import serial
 import time
+import math
 
 # Initialize the serial connection to Arduino
 arduino = serial.Serial('/dev/ttyACM0', 9600)  # Replace with your Arduino's serial port
@@ -23,6 +23,9 @@ def average_slope_intercept(lines):
 
     for line in lines:
         for x1, y1, x2, y2 in line:
+            # Avoid divide by zero error
+            if x2 - x1 == 0:
+                continue  # Skip vertical lines
             slope = (y2 - y1) / (x2 - x1)
             intercept = y1 - slope * x1
             if slope < 0:  # Negative slope -> left line
@@ -39,11 +42,22 @@ def average_slope_intercept(lines):
 def calculate_steering(height, width, left_line):
     center_x = width // 2
 
+    if left_line is None or len(left_line) != 2:
+        return 105  # Default center angle if the line is invalid
+
+    slope, intercept = left_line
+
+    # Ensure valid slope and intercept
+    if math.isnan(slope) or math.isnan(intercept):
+        return 105  # Return default center angle if values are invalid
+
     # Calculate x position of the left line at the bottom of the frame
-    if left_line is not None:
-        left_x = int((height - left_line[1]) / left_line[0])
-    else:
-        left_x = 0
+    try:
+        left_x = int((height - intercept) / slope)
+        if left_x < 0 or left_x > width:
+            return 105  # Out of bounds, return default steering angle
+    except ZeroDivisionError:
+        left_x = width // 2  # Default to center if there's a division by zero
 
     # Find the lane center (assuming a single line to the left of the car)
     lane_center = left_x
@@ -52,10 +66,7 @@ def calculate_steering(height, width, left_line):
     deviation = lane_center - center_x
 
     # Calculate steering angle
-    if deviation < 0:
-        angle = 105 + (deviation / center_x) * 25  # Steer left
-    else:
-        angle = 105 + (deviation / center_x) * 25  # Steer right
+    angle = 105 + (deviation / center_x) * 25  # Steer left or right
 
     # Clamp angle between 80 and 130 degrees
     angle = max(80, min(130, angle))
