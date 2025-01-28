@@ -1,3 +1,4 @@
+# Note: This program ONLY detects and reacts to stop signs. Use main_detection.py for both lane line and stop sign reaction.
 import cv2
 import numpy as np
 import serial
