@@ -15,10 +15,9 @@ def region_of_interest(img, vertices):
 
 def average_slope_intercept(lines):
     left_lines = []
-    right_lines = []
 
     if lines is None:
-        return None, None
+        return None
 
     for line in lines:
         for x1, y1, x2, y2 in line:
@@ -26,31 +25,23 @@ def average_slope_intercept(lines):
             intercept = y1 - slope * x1
             if slope < 0:  # Negative slope -> left line
                 left_lines.append((slope, intercept))
-            else:          # Positive slope -> right line
-                right_lines.append((slope, intercept))
 
-    # Average slope and intercept for left and right lanes
+    # Average slope and intercept for the left lane
     left_avg = np.mean(left_lines, axis=0) if left_lines else None
-    right_avg = np.mean(right_lines, axis=0) if right_lines else None
 
-    return left_avg, right_avg
+    return left_avg
 
-def calculate_steering(height, width, left_line, right_line):
+def calculate_steering(height, width, left_line):
     center_x = width // 2
 
-    # Calculate x positions of the left and right lines at the bottom of the frame
+    # Calculate x position of the left line at the bottom of the frame
     if left_line is not None:
         left_x = int((height - left_line[1]) / left_line[0])
     else:
         left_x = 0
 
-    if right_line is not None:
-        right_x = int((height - right_line[1]) / right_line[0])
-    else:
-        right_x = width
-
-    # Find the lane center
-    lane_center = (left_x + right_x) // 2
+    # Find the lane center (left lane line is used to guide the vehicle)
+    lane_center = left_x
 
     # Deviation from the frame center
     deviation = lane_center - center_x
@@ -76,13 +67,12 @@ def process_frame(frame):
     # Edge detection using Canny
     edges = cv2.Canny(blur, 50, 150)
 
-    # Define region of interest
+    # Define region of interest (left half of the frame only)
     height, width = edges.shape
     roi_vertices = np.array([[
         (0, height),
-        (width // 2 - 50, height // 2 + 50),
-        (width // 2 + 50, height // 2 + 50),
-        (width, height)
+        (width // 2, height // 2 + 50),
+        (0, height // 2 + 50)
     ]], dtype=np.int32)
 
     cropped_edges = region_of_interest(edges, roi_vertices)
@@ -90,11 +80,11 @@ def process_frame(frame):
     # Detect lines using Hough Transform
     lines = cv2.HoughLinesP(cropped_edges, rho=1, theta=np.pi/180, threshold=50, minLineLength=40, maxLineGap=100)
 
-    # Calculate average lane lines
-    left_line, right_line = average_slope_intercept(lines)
+    # Calculate average lane lines (only left lane)
+    left_line = average_slope_intercept(lines)
 
     # Calculate steering angle
-    steering_angle = calculate_steering(height, width, left_line, right_line)
+    steering_angle = calculate_steering(height, width, left_line)
 
     return steering_angle
 
