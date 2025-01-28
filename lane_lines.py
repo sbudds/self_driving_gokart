@@ -21,24 +21,34 @@ def average_slope_intercept(lines):
 
     for line in lines:
         for x1, y1, x2, y2 in line:
+            # Avoid division by zero
+            if x2 - x1 == 0:
+                continue  # Skip vertical lines
+
             slope = (y2 - y1) / (x2 - x1)
             intercept = y1 - slope * x1
             if slope < 0:  # Negative slope -> left line
                 left_lines.append((slope, intercept))
 
     # Average slope and intercept for the left lane
-    left_avg = np.mean(left_lines, axis=0) if left_lines else None
-
-    return left_avg
+    if left_lines:
+        left_avg = np.mean(left_lines, axis=0)
+        return left_avg
+    else:
+        return None
 
 def calculate_steering(height, width, left_line):
+    if left_line is None:
+        return 105  # Return default angle if no left lane line is detected
+
     center_x = width // 2
 
     # Calculate x position of the left line at the bottom of the frame
-    if left_line is not None:
-        left_x = int((height - left_line[1]) / left_line[0])
+    slope, intercept = left_line
+    if slope == 0:
+        left_x = 0  # If slope is 0 (horizontal line), set left_x to 0
     else:
-        left_x = 0
+        left_x = int((height - intercept) / slope)
 
     # Find the lane center (left lane line is used to guide the vehicle)
     lane_center = left_x
