@@ -1,135 +1,119 @@
+import torch
 import cv2
 import numpy as np
 import serial
 import time
-import math
 
-# Initialize the serial connection to Arduino
-arduino = serial.Serial('/dev/ttyACM0', 9600)  # Replace with your Arduino's serial port
-time.sleep(2)  # Wait for the connection to initialize
+# Setup for Arduino communication (Ensure correct port is used)
+arduino = serial.Serial('/dev/ttyACM0', 9600)
+time.sleep(2)
 
-def region_of_interest(img, vertices):
-    mask = np.zeros_like(img)
-    cv2.fillPoly(mask, vertices, 255)
-    masked_img = cv2.bitwise_and(img, mask)
-    return masked_img
+# Setup Video Capture
+cap = cv2.VideoCapture(0)  # Adjust the source as needed
 
-def average_slope_intercept(lines):
-    left_lines = []
-    right_lines = []
+# Reduce resolution for faster processing
+cap.set(3, 640)  # Set width
+cap.set(4, 360)  # Set height
 
-    if lines is None:
-        return None, None
+# Skip frames for performance improvement
+frame_skip = 2  # Skip every 2 frames for faster processing
 
-    for line in lines:
-        for x1, y1, x2, y2 in line:
-            # Avoid divide by zero error
-            if x2 - x1 == 0:
-                continue  # Skip vertical lines
-            slope = (y2 - y1) / (x2 - x1)
-            intercept = y1 - slope * x1
-            if slope > 0:  # Negative slope -> left line
-                left_lines.append((slope, intercept))
-            else:          # Positive slope -> right line
-                right_lines.append((slope, intercept))
+# Smooth the steering by keeping track of previous angles
+previous_angle = 105  # Start with center position (105 degrees)
 
-    # Average slope and intercept for left and right lanes
-    left_avg = np.mean(left_lines, axis=0) if left_lines else None
-    right_avg = np.mean(right_lines, axis=0) if right_lines else None
+# Device setup (make sure your device is CUDA-capable)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    return left_avg, right_avg
+def calculate_steering_angle(frame_height, contours, prev_angle):
+    center_angle = 105
+    angle_range = 25
+    min_angle = center_angle - angle_range
+    max_angle = center_angle + angle_range
 
-def calculate_steering(height, width, left_line):
-    center_x = width // 2
+    if len(contours) == 0:
+        return prev_angle  # No lines detected, return previous angle for smoothing
 
-    if left_line is None or len(left_line) != 2:
-        return 105  # Default center angle if the line is invalid
+    # Filter contours for the left side (e.g., left lane line detection)
+    left_contours = [contour for contour in contours if np.mean(contour[:, 0, 0]) < frame_height / 2]
 
-    slope, intercept = left_line
+    if len(left_contours) == 0:
+        return prev_angle  # No left lane detected, return previous angle
 
-    # Ensure valid slope and intercept
-    if math.isnan(slope) or math.isnan(intercept):
-        return 105  # Return default center angle if values are invalid
+    # Find the angle of the largest contour on the left side
+    largest_contour = max(left_contours, key=cv2.contourArea)
+    rect = cv2.minAreaRect(largest_contour)
+    angle = rect[2]  # The rotation angle of the bounding box
 
-    # Calculate x position of the left line at the bottom of the frame
-    try:
-        left_x = int((height - intercept) / slope)
-        if left_x < 0 or left_x > width:
-            return 105  # Out of bounds, return default steering angle
-    except ZeroDivisionError:
-        left_x = width // 2  # Default to center if there's a division by zero
+    # Apply smooth steering by adjusting to a weighted average of current and previous angles
+    steering_angle = prev_angle * 0.7 + angle * 0.3  # 70% weight on previous, 30% on current
+    steering_angle = np.clip(steering_angle, min_angle, max_angle)
 
-    # Find the lane center (assuming a single line to the left of the car)
-    lane_center = left_x
-
-    # Deviation from the frame center
-    deviation = lane_center - center_x
-
-    # Calculate steering angle
-    angle = 105 + (deviation / center_x) * 25  # Steer left or right
-
-    # Clamp angle between 80 and 130 degrees
-    angle = max(80, min(130, angle))
-
-    return int(angle)
+    return int(steering_angle)
 
 def process_frame(frame):
-    # Convert to grayscale
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    # Upload frame to GPU (ensure it's on GPU)
+    gpu_frame = torch.tensor(frame).to(device).float()  # Move the frame to GPU
+    gpu_frame /= 255.0  # Normalize the frame if needed
 
-    # Apply Gaussian blur
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    # Convert to grayscale (make sure the tensor stays on GPU)
+    gray_tensor = gpu_frame.mean(dim=2, keepdim=True)  # Average over the color channels
 
-    # Edge detection using Canny
-    edges = cv2.Canny(blur, 50, 150)
+    # Apply threshold for edge detection (as an alternative to Canny)
+    thresholded_tensor = gray_tensor > 0.4  # Use a simple threshold for binary image creation
 
-    # Define region of interest
-    height, width = edges.shape
-    roi_vertices = np.array([[
-        (0, height),
-        (width // 2 - 50, height // 2 + 50),
-        (width // 2 + 50, height // 2 + 50),
-        (width, height)
-    ]], dtype=np.int32)
+    # Explicitly move to CPU for further processing and convert back to numpy
+    binary_frame_cpu = thresholded_tensor.cpu().numpy().astype(np.uint8) * 255
 
-    cropped_edges = region_of_interest(edges, roi_vertices)
+    # Find contours on the edges (CPU-based)
+    contours, _ = cv2.findContours(binary_frame_cpu, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
-    # Detect lines using Hough Transform
-    lines = cv2.HoughLinesP(cropped_edges, rho=1, theta=np.pi/180, threshold=50, minLineLength=40, maxLineGap=100)
+    # Free GPU memory periodically to avoid memory fragmentation
+    torch.cuda.empty_cache()
 
-    # Calculate average lane lines
-    left_line, right_line = average_slope_intercept(lines)
+    return contours, binary_frame_cpu
 
-    # Calculate steering angle (for the left line)
-    steering_angle = calculate_steering(height, width, left_line)
-
-    return steering_angle
+def send_steering_angle(angle):
+    # Send steering angle to Arduino
+    arduino.write(f"{angle}\n".encode())
+    print(f"Steering Angle: {angle}")  # Print the steering angle for debugging
 
 def main():
-    # Open the camera feed
-    cap = cv2.VideoCapture(0)  # Use the appropriate index for your camera
+    global previous_angle
+    frame_count = 0
 
-    if not cap.isOpened():
-        print("Error: Unable to access the camera.")
-        return
-
-    while True:
+    while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
-            print("Error: Unable to fetch frame from camera.")
             break
 
-        # Process the frame and get the steering angle
-        steering_angle = process_frame(frame)
+        # Skip frames for performance boost
+        frame_count += 1
+        if frame_count % frame_skip != 0:
+            continue
 
-        # Send steering angle to Arduino (with newline)
-        arduino.flush()  # Ensure the serial buffer is cleared
-        arduino.write(f"{steering_angle}\n".encode())  # Ensure the newline character is sent
+        # Process the frame to detect lanes
+        contours, edges = process_frame(frame)
 
-        # Print the steering angle to the terminal
-        print(f"Steering Angle: {steering_angle}")
+        # Calculate steering angle based on lane detection
+        steering_angle = calculate_steering_angle(frame.shape[0], contours, previous_angle)
 
-        time.sleep(0.1)  # Optional: Small delay before sending the next angle
+        # Update the previous angle for smooth control
+        previous_angle = steering_angle
+
+        # Send the calculated angle to the Arduino
+        send_steering_angle(steering_angle)
+
+        # Display the frame with detected contours (for debugging purposes)
+        cv2.imshow("Edges", edges)
+
+        # Debugging: Monitor GPU usage and device status
+        print(f"GPU Device: {torch.cuda.current_device()}, Memory Allocated: {torch.cuda.memory_allocated()}")
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()
