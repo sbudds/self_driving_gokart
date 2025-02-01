@@ -34,7 +34,7 @@ def detect_stop_signs(frame):
     if current_time - last_detection_time < 5:
         return  
 
-    resized_frame = cv2.resize(frame, (640, 360))
+    resized_frame = cv2.resize(frame, (540, 260))
     rgb_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
     results = model(rgb_frame)
     detections = results.xyxy[0]
