@@ -1,4 +1,3 @@
-# Note: This program ONLY detects and reacts to stop signs. Use main_detection.py for both lane line and stop sign reaction.
 import cv2
 import torch
 import serial
@@ -16,13 +15,25 @@ except Exception as e:
     print(f"Error: Could not connect to Arduino on {SERIAL_PORT}: {e}")
     arduino = None
 
-# Load the YOLOv5 model
-model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
+# Load the YOLOv5 model with CUDA support
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+print(f"Using device: {device}")
+
+model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True).to(device)
 
 # Define target class
 TARGET_CLASSES = ['stop sign']
+last_detection_time = 0  # Tracks last detection time (seconds)
 
 def detect_stop_signs(frame):
+    global last_detection_time
+
+    current_time = time.time()  # Get current time
+
+    # Ignore detection if it's within 5 seconds of the last one
+    if current_time - last_detection_time < 5:
+        return  
+
     resized_frame = cv2.resize(frame, (640, 360))
     rgb_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
     results = model(rgb_frame)
@@ -41,9 +52,10 @@ def detect_stop_signs(frame):
                 try:
                     arduino.write(b'STOP\n')
                     print("Signal sent to Arduino: STOP")
-                    time.sleep(4)
+                    time.sleep(2)  
                     arduino.write(b'GO\n')
                     print("Signal sent to Arduino: GO")
+                    last_detection_time = time.time()  # Update last detection time
                 except Exception as e:
                     print(f"Error sending signal to Arduino: {e}")
             break
