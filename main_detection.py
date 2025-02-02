@@ -1,177 +1,90 @@
-import cv2
 import torch
+import cv2
 import serial
 import time
-import threading
-import numpy as np
 
 # Initialize the Arduino serial connection
-SERIAL_PORT = '/dev/ttyACM0'  # Replace with your port
+SERIAL_PORT = '/dev/ttyACM0'  # Update with the correct port
 BAUD_RATE = 9600
 
 try:
     arduino = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-    time.sleep(2)  # Allow time for the serial connection to initialize
+    time.sleep(2)
     print(f"Connected to Arduino on {SERIAL_PORT}")
 except Exception as e:
     print(f"Error: Could not connect to Arduino on {SERIAL_PORT}: {e}")
     arduino = None
 
-# Load the YOLOv5 model
-model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
+# Load YOLOv5 model with CUDA support (for lane detection as well)
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+print(f"Using device: {device}")
 
-# Define the labels of interest (e.g., 'stop sign' label from your dataset)
-TARGET_CLASSES = ['stop sign']
+model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True).to(device)
 
-# Lane following-related functions
-def region_of_interest(img, vertices):
-    mask = np.zeros_like(img)
-    cv2.fillPoly(mask, vertices, 255)
-    masked_img = cv2.bitwise_and(img, mask)
-    return masked_img
+# Define target class (For lane detection, we need to adjust this to lane-related classes)
+TARGET_CLASSES = ['lane']  # This will depend on your dataset if you fine-tune YOLOv5
 
-def average_slope_intercept(lines):
-    left_lines = []
-    right_lines = []
+last_detection_time = 0  # Tracks last detection time (seconds)
 
-    if lines is None:
-        return None, None
+def detect_lanes(frame):
+    global last_detection_time
 
-    for line in lines:
-        for x1, y1, x2, y2 in line:
-            slope = (y2 - y1) / (x2 - x1)
-            intercept = y1 - slope * x1
-            if slope > 0:  # Negative slope -> left line
-                left_lines.append((slope, intercept))
-            else:          # Positive slope -> right line
-                right_lines.append((slope, intercept))
+    current_time = time.time()  # Get current time
 
-    left_avg = np.mean(left_lines, axis=0) if left_lines else None
-    right_avg = np.mean(right_lines, axis=0) if right_lines else None
+    # Ignore detection if it's within 5 seconds of the last one
+    if current_time - last_detection_time < 5:
+        return  
 
-    return left_avg, right_avg
-
-def calculate_steering(height, width, left_line):
-    center_x = width // 2
-    if left_line is not None:
-        left_x = int((height - left_line[1]) / left_line[0])
-    else:
-        left_x = 0
-    lane_center = left_x
-    deviation = lane_center - center_x
-
-    angle = 105 + (deviation / center_x) * 25  # Steering adjustment
-    angle = max(80, min(130, angle)) 
-    return int(angle)
-
-def process_frame(frame):
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blur, 50, 150)
-    height, width = edges.shape
-    roi_vertices = np.array([[
-        (0, height),
-        (width // 2 - 50, height // 2 + 50),
-        (width // 2 + 50, height // 2 + 50),
-        (width, height)
-    ]], dtype=np.int32)
-    cropped_edges = region_of_interest(edges, roi_vertices)
-
-    lines = cv2.HoughLinesP(cropped_edges, rho=1, theta=np.pi/180, threshold=50, minLineLength=40, maxLineGap=100)
-    left_line, right_line = average_slope_intercept(lines)
-    steering_angle = calculate_steering(height, width, left_line)
-    return steering_angle
-
-def lane_following():
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("Error: Unable to access video source.")
-        return
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("Error: Unable to read frame.")
-            break
-
-        steering_angle = process_frame(frame)
-
-        # Send the steering angle to Arduino
-        if arduino:
-            try:
-                arduino.flush()
-                arduino.write(f"{steering_angle}\n".encode())
-                print(f"Steering Angle Sent: {steering_angle}")
-            except Exception as e:
-                print(f"Error sending steering angle to Arduino: {e}")
-
-        time.sleep(0.1)  # Delay for processing time
-
-    cap.release()
-
-# Stop sign detection-related functions
-def detect_stop_signs(frame):
-    resized_frame = cv2.resize(frame, (640, 360))
+    resized_frame = cv2.resize(frame, (540, 260))
     rgb_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
-    results = model(rgb_frame)
+    results = model(rgb_frame)  # Model inference directly on the GPU
+    detections = results.xyxy[0]
 
-    detections = results.xyxy[0]  # [x_min, y_min, x_max, y_max, confidence, class]
+    # Process detection results
     for *box, confidence, cls in detections:
         class_name = results.names[int(cls)]
         if class_name in TARGET_CLASSES:
-            print(f"Stop sign detected with confidence: {confidence:.2f}")
-
-            # Send a signal to Arduino
+            x_min, y_min, x_max, y_max = map(int, box)
+            cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
+            cv2.putText(frame, f"{class_name} ({confidence:.2f})", (x_min, y_min - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            print(f"Lane detected with confidence: {confidence:.2f}")
+            
+            # Send signal to Arduino (steering control)
             if arduino:
                 try:
                     arduino.write(b'STOP\n')
                     print("Signal sent to Arduino: STOP")
-                    time.sleep(4)  # Wait for 4 seconds (simulate stop)
+                    time.sleep(2)  # Wait before sending GO command
                     arduino.write(b'GO\n')
                     print("Signal sent to Arduino: GO")
+                    last_detection_time = time.time()  # Update last detection time
                 except Exception as e:
                     print(f"Error sending signal to Arduino: {e}")
             break
 
-def stop_sign_detection():
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("Error: Unable to access video source.")
-        return
+cap = cv2.VideoCapture(0)
+if not cap.isOpened():
+    print("Error: Unable to access video source.")
+    exit()
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("Error: Unable to read frame.")
-            break
+print("Processing video input... (Press 'q' to quit)")
 
-        detect_stop_signs(frame)
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        print("Error: Unable to read frame.")
+        break
 
-    cap.release()
+    # Perform lane detection
+    detect_lanes(frame)
+    cv2.imshow("Lane Detection", frame)
+    
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
 
-# Main function to run both tasks concurrently
-def main():
-    # Start the lane following thread
-    lane_thread = threading.Thread(target=lane_following)
-    lane_thread.daemon = True
-    lane_thread.start()
+cap.release()
+cv2.destroyAllWindows()
 
-    # Start the stop sign detection thread
-    stop_sign_thread = threading.Thread(target=stop_sign_detection)
-    stop_sign_thread.daemon = True
-    stop_sign_thread.start()
-
-    try:
-        # Keep the main thread running while other threads are active
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("Program stopped by user.")
-
-    # Cleanup
-    if arduino:
-        arduino.close()
-
-if __name__ == "__main__":
-    main()
-
+if arduino:
+    arduino.close()
