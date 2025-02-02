@@ -4,17 +4,17 @@ import numpy as np
 import serial
 import time
 
-# Setup for Arduino communication (Ensure correct port is used)
+# Setup for Arduino communication
 arduino = serial.Serial('/dev/ttyACM0', 9600)
 time.sleep(2)
 
 # Setup Video Capture
-cap = cv2.VideoCapture(0)  # Adjust the source as needed
-cap.set(3, 640)  # Set width
-cap.set(4, 360)  # Set height
+cap = cv2.VideoCapture(0)
+cap.set(3, 640)  # Width
+cap.set(4, 360)  # Height
 
-frame_skip = 2  # Skip every 2 frames for faster processing
-previous_angle = 105  # Start with center position (105 degrees)
+frame_skip = 2  
+previous_angle = 105  
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
@@ -27,7 +27,7 @@ def calculate_steering_angle(frame_width, contours, prev_angle):
     if len(contours) == 0:
         return prev_angle
 
-    left_contours = [contour for contour in contours if np.mean(contour[:, 0, 0]) < frame_width / 2]
+    left_contours = [c for c in contours if np.mean(c[:, 0, 0]) < frame_width / 2]
     if len(left_contours) == 0:
         return prev_angle
 
@@ -36,18 +36,28 @@ def calculate_steering_angle(frame_width, contours, prev_angle):
     angle = rect[2]
 
     steering_angle = prev_angle * 0.7 + angle * 0.3
-    steering_angle = np.clip(steering_angle, min_angle, max_angle)
-    return int(steering_angle)
+    return int(np.clip(steering_angle, min_angle, max_angle))
 
 def process_frame(frame):
-    frame_gpu = torch.from_numpy(frame).to(device, dtype=torch.float32) / 255.0
-    gray_gpu = torch.mean(frame_gpu, dim=2, keepdim=True)
-    binary_gpu = (gray_gpu > 0.4).float()
+    # Upload frame to GPU
+    frame_gpu = cv2.cuda_GpuMat()
+    frame_gpu.upload(frame)
+
+    # Convert to grayscale
+    gray_gpu = cv2.cuda.cvtColor(frame_gpu, cv2.COLOR_BGR2GRAY)
+
+    # Apply Gaussian blur
+    blurred_gpu = cv2.cuda.GaussianBlur(gray_gpu, (5, 5), 0)
+
+    # Canny edge detection
+    edges_gpu = cv2.cuda.Canny(blurred_gpu, 50, 150)
+
+    # Download result to CPU for contour detection
+    edges_cpu = edges_gpu.download()
     
-    binary_cpu = (binary_gpu * 255).byte().cpu().numpy()
-    contours, _ = cv2.findContours(binary_cpu, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(edges_cpu, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     
-    return contours, binary_cpu
+    return contours, edges_cpu
 
 def send_steering_angle(angle):
     arduino.write(f"{angle}\n".encode())
@@ -56,7 +66,6 @@ def send_steering_angle(angle):
 def main():
     global previous_angle
     frame_count = 0
-    torch.cuda.empty_cache()
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -75,6 +84,8 @@ def main():
         cv2.imshow("Edges", edges)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
+        
+        torch.cuda.empty_cache()
     
     cap.release()
     cv2.destroyAllWindows()
