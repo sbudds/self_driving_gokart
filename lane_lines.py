@@ -16,6 +16,7 @@ cap.set(4, 360)  # Set height
 frame_skip = 2  # Skip every 2 frames for faster processing
 previous_angle = 105  # Start with center position (105 degrees)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {device}")
 
 def calculate_steering_angle(frame_width, contours, prev_angle):
     center_angle = 105
