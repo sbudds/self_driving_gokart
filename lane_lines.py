@@ -15,7 +15,7 @@ cap.set(4, 360)  # Height
 
 frame_skip = 2  
 previous_angle = 105  
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda')  # Force GPU usage
 print(f"Using device: {device}")
 
 def calculate_steering_angle(frame_width, contours, prev_angle):
@@ -43,9 +43,9 @@ def process_frame(frame):
         # Convert frame to tensor and move to GPU
         frame_gpu = torch.tensor(frame, device=device, dtype=torch.float32).permute(2, 0, 1) / 255.0  
 
-        # Convert to grayscale using PyTorch (avoid OpenCV to keep data on GPU)
+        # Convert to grayscale using PyTorch (keep data on GPU)
         gray_gpu = 0.299 * frame_gpu[0] + 0.587 * frame_gpu[1] + 0.114 * frame_gpu[2]  
-        
+
         # Apply edge detection manually (avoiding OpenCV)
         sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], device=device, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
         sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], device=device, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
