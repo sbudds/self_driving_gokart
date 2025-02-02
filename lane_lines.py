@@ -39,23 +39,28 @@ def calculate_steering_angle(frame_width, contours, prev_angle):
     return int(np.clip(steering_angle, min_angle, max_angle))
 
 def process_frame(frame):
-    # Upload frame to GPU
-    frame_gpu = cv2.cuda_GpuMat()
-    frame_gpu.upload(frame)
+    with torch.no_grad():  # No gradients needed for inference
+        # Convert frame to tensor and move to GPU
+        frame_gpu = torch.tensor(frame, device=device, dtype=torch.float32).permute(2, 0, 1) / 255.0  
 
-    # Convert to grayscale
-    gray_gpu = cv2.cuda.cvtColor(frame_gpu, cv2.COLOR_BGR2GRAY)
+        # Convert to grayscale using PyTorch (avoid OpenCV to keep data on GPU)
+        gray_gpu = 0.299 * frame_gpu[0] + 0.587 * frame_gpu[1] + 0.114 * frame_gpu[2]  
+        
+        # Apply edge detection manually (avoiding OpenCV)
+        sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], device=device, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+        sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], device=device, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+        
+        gray_gpu = gray_gpu.unsqueeze(0).unsqueeze(0)  # Convert to (N, C, H, W) for conv2d
+        
+        edges_x = torch.nn.functional.conv2d(gray_gpu, sobel_x, padding=1)
+        edges_y = torch.nn.functional.conv2d(gray_gpu, sobel_y, padding=1)
+        
+        edges_gpu = torch.sqrt(edges_x ** 2 + edges_y ** 2)
+        edges_gpu = (edges_gpu > 0.4).float()  # Thresholding
 
-    # Apply Gaussian blur
-    blurred_gpu = cv2.cuda.GaussianBlur(gray_gpu, (5, 5), 0)
-
-    # Canny edge detection
-    edges_gpu = cv2.cuda.Canny(blurred_gpu, 50, 150)
-
-    # Download result to CPU for contour detection
-    edges_cpu = edges_gpu.download()
-    
-    contours, _ = cv2.findContours(edges_cpu, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        # Move processed frame back to CPU for contour detection
+        edges_cpu = (edges_gpu * 255).byte().squeeze().cpu().numpy()
+        contours, _ = cv2.findContours(edges_cpu, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     
     return contours, edges_cpu
 
