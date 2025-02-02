@@ -68,6 +68,12 @@ def send_steering_angle(angle):
     arduino.write(f"{angle}\n".encode())
     print(f"Steering Angle: {angle}")
 
+def clear_gpu_memory():
+    torch.cuda.empty_cache()  # Clear unused GPU memory
+    # Force garbage collection to clean up memory
+    import gc
+    gc.collect()
+
 def main():
     global previous_angle
     frame_count = 0
@@ -81,16 +87,24 @@ def main():
         if frame_count % frame_skip != 0:
             continue
 
+        # Process the frame
         contours, edges = process_frame(frame)
+        
+        # Calculate the steering angle based on contours
         steering_angle = calculate_steering_angle(frame.shape[1], contours, previous_angle)
         previous_angle = steering_angle
+
+        # Send the calculated steering angle to the Arduino
         send_steering_angle(steering_angle)
-        
+
+        # Display the edges on screen (optional)
         cv2.imshow("Edges", edges)
+        
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
         
-        torch.cuda.empty_cache()
+        # Explicitly clear GPU memory and force garbage collection
+        clear_gpu_memory()
     
     cap.release()
     cv2.destroyAllWindows()
