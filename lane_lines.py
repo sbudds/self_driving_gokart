@@ -1,113 +1,210 @@
-import torch
 import cv2
+import torch
+import scipy.special
 import numpy as np
-import serial
-import time
+import torchvision
+import torchvision.transforms as transforms
+from PIL import Image
+from enum import Enum
+from scipy.spatial.distance import cdist
 
-# Setup for Arduino communication
-arduino = serial.Serial('/dev/ttyACM0', 9600)
-time.sleep(2)
+from ultrafastLaneDetector.model import parsingNet
 
-# Setup Video Capture
-cap = cv2.VideoCapture(0)
-cap.set(3, 640)  # Width
-cap.set(4, 360)  # Height
+lane_colors = [(0,0,255),(0,255,0),(255,0,0),(0,255,255)]
 
-frame_skip = 2  
-previous_angle = 105  
-device = torch.device('cuda')  # Force GPU usage
-print(f"Using device: {device}")
+tusimple_row_anchor = [ 64,  68,  72,  76,  80,  84,  88,  92,  96, 100, 104, 108, 112,
+			116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156, 160, 164,
+			168, 172, 176, 180, 184, 188, 192, 196, 200, 204, 208, 212, 216,
+			220, 224, 228, 232, 236, 240, 244, 248, 252, 256, 260, 264, 268,
+			272, 276, 280, 284]
+culane_row_anchor = [121, 131, 141, 150, 160, 170, 180, 189, 199, 209, 219, 228, 238, 248, 258, 267, 277, 287]
 
-def calculate_steering_angle(frame_width, contours, prev_angle):
-    center_angle = 105
-    angle_range = 25
-    min_angle = center_angle - angle_range
-    max_angle = center_angle + angle_range
 
-    if len(contours) == 0:
-        return prev_angle
+class ModelType(Enum):
+	TUSIMPLE = 0
+	CULANE = 1
 
-    left_contours = [c for c in contours if np.mean(c[:, 0, 0]) < frame_width / 2]
-    if len(left_contours) == 0:
-        return prev_angle
+class ModelConfig():
 
-    largest_contour = max(left_contours, key=cv2.contourArea)
-    rect = cv2.minAreaRect(largest_contour)
-    angle = rect[2]
+	def __init__(self, model_type):
 
-    steering_angle = prev_angle * 0.7 + angle * 0.3
-    return int(np.clip(steering_angle, min_angle, max_angle))
+		if model_type == ModelType.TUSIMPLE:
+			self.init_tusimple_config()
+		else:
+			self.init_culane_config()
 
-def process_frame(frame):
-    with torch.no_grad():  # No gradients needed for inference
-        # Convert frame to tensor and move to GPU
-        frame_gpu = torch.tensor(frame, device=device, dtype=torch.float32).permute(2, 0, 1) / 255.0  
+	def init_tusimple_config(self):
+		self.img_w = 1280
+		self.img_h = 720
+		self.row_anchor = tusimple_row_anchor
+		self.griding_num = 100
+		self.cls_num_per_lane = 56
 
-        # Convert to grayscale using PyTorch (keep data on GPU)
-        gray_gpu = 0.299 * frame_gpu[0] + 0.587 * frame_gpu[1] + 0.114 * frame_gpu[2]  
+	def init_culane_config(self):
+		self.img_w = 1640
+		self.img_h = 590
+		self.row_anchor = culane_row_anchor
+		self.griding_num = 200
+		self.cls_num_per_lane = 18
 
-        # Apply edge detection manually (avoiding OpenCV)
-        sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], device=device, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-        sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], device=device, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-        
-        gray_gpu = gray_gpu.unsqueeze(0).unsqueeze(0)  # Convert to (N, C, H, W) for conv2d
-        
-        edges_x = torch.nn.functional.conv2d(gray_gpu, sobel_x, padding=1)
-        edges_y = torch.nn.functional.conv2d(gray_gpu, sobel_y, padding=1)
-        
-        edges_gpu = torch.sqrt(edges_x ** 2 + edges_y ** 2)
-        edges_gpu = (edges_gpu > 0.4).float()  # Thresholding
+class UltrafastLaneDetector():
 
-        # Move processed frame back to CPU for contour detection
-        edges_cpu = (edges_gpu * 255).byte().squeeze().cpu().numpy()
-        contours, _ = cv2.findContours(edges_cpu, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    
-    return contours, edges_cpu
+	def __init__(self, model_path, model_type=ModelType.TUSIMPLE, use_gpu=False):
 
-def send_steering_angle(angle):
-    arduino.write(f"{angle}\n".encode())
-    print(f"Steering Angle: {angle}")
+		self.use_gpu = use_gpu
 
-def clear_gpu_memory():
-    torch.cuda.empty_cache()  # Clear unused GPU memory
-    # Force garbage collection to clean up memory
-    import gc
-    gc.collect()
+		# Load model configuration based on the model type
+		self.cfg = ModelConfig(model_type)
 
-def main():
-    global previous_angle
-    frame_count = 0
+		# Initialize model
+		self.model = self.initialize_model(model_path, self.cfg, use_gpu)
 
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
+		# Initialize image transformation
+		self.img_transform = self.initialize_image_transform()
 
-        frame_count += 1
-        if frame_count % frame_skip != 0:
-            continue
+	@staticmethod
+	def initialize_model(model_path, cfg, use_gpu):
 
-        # Process the frame
-        contours, edges = process_frame(frame)
-        
-        # Calculate the steering angle based on contours
-        steering_angle = calculate_steering_angle(frame.shape[1], contours, previous_angle)
-        previous_angle = steering_angle
+		# Load the model architecture
+		net = parsingNet(pretrained = False, backbone='18', cls_dim = (cfg.griding_num+1,cfg.cls_num_per_lane,4),
+						use_aux=False) # we dont need auxiliary segmentation in testing
 
-        # Send the calculated steering angle to the Arduino
-        send_steering_angle(steering_angle)
 
-        # Display the edges on screen (optional)
-        cv2.imshow("Edges", edges)
-        
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-        
-        # Explicitly clear GPU memory and force garbage collection
-        clear_gpu_memory()
-    
-    cap.release()
-    cv2.destroyAllWindows()
+		# Load the weights from the downloaded model
+		if use_gpu:
+			if torch.backends.mps.is_built():
+				net = net.to("mps")
+				state_dict = torch.load(model_path, map_location='mps')['model'] # Apple GPU
+			else:
+				net = net.cuda()
+				state_dict = torch.load(model_path, map_location='cuda')['model'] # CUDA
+		else:
+			state_dict = torch.load(model_path, map_location='cpu')['model'] # CPU
 
-if __name__ == "__main__":
-    main()
+		compatible_state_dict = {}
+		for k, v in state_dict.items():
+			if 'module.' in k:
+				compatible_state_dict[k[7:]] = v
+			else:
+				compatible_state_dict[k] = v
+
+		# Load the weights into the model
+		net.load_state_dict(compatible_state_dict, strict=False)
+		net.eval()
+
+		return net
+
+	@staticmethod
+	def initialize_image_transform():
+		# Create transfom operation to resize and normalize the input images
+		img_transforms = transforms.Compose([
+			transforms.Resize((288, 800)),
+			transforms.ToTensor(),
+			transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+		])
+
+		return img_transforms
+
+	def detect_lanes(self, image, draw_points=True):
+
+		input_tensor = self.prepare_input(image)
+
+		# Perform inference on the image
+		output = self.inference(input_tensor)
+
+		# Process output data
+		self.lanes_points, self.lanes_detected = self.process_output(output, self.cfg)
+
+		# Draw depth image
+		visualization_img = self.draw_lanes(image, self.lanes_points, self.lanes_detected, self.cfg, draw_points)
+
+		return visualization_img
+
+	def prepare_input(self, img):
+		# Transform the image for inference
+		img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+		img_pil = Image.fromarray(img)
+		input_img = self.img_transform(img_pil)
+		input_tensor = input_img[None, ...]
+
+		if self.use_gpu:
+			if not torch.backends.mps.is_built():
+				input_tensor = input_tensor.cuda()
+
+		return input_tensor
+
+	def inference(self, input_tensor):
+		with torch.no_grad():
+			output = self.model(input_tensor)
+
+		return output
+
+
+	@staticmethod
+	def process_output(output, cfg):		
+		# Parse the output of the model
+		processed_output = output[0].data.cpu().numpy()
+		processed_output = processed_output[:, ::-1, :]
+		prob = scipy.special.softmax(processed_output[:-1, :, :], axis=0)
+		idx = np.arange(cfg.griding_num) + 1
+		idx = idx.reshape(-1, 1, 1)
+		loc = np.sum(prob * idx, axis=0)
+		processed_output = np.argmax(processed_output, axis=0)
+		loc[processed_output == cfg.griding_num] = 0
+		processed_output = loc
+
+
+		col_sample = np.linspace(0, 800 - 1, cfg.griding_num)
+		col_sample_w = col_sample[1] - col_sample[0]
+
+		lanes_points = []
+		lanes_detected = []
+
+		max_lanes = processed_output.shape[1]
+		for lane_num in range(max_lanes):
+			lane_points = []
+			# Check if there are any points detected in the lane
+			if np.sum(processed_output[:, lane_num] != 0) > 2:
+
+				lanes_detected.append(True)
+
+				# Process each of the points for each lane
+				for point_num in range(processed_output.shape[0]):
+					if processed_output[point_num, lane_num] > 0:
+						lane_point = [int(processed_output[point_num, lane_num] * col_sample_w * cfg.img_w / 800) - 1, int(cfg.img_h * (cfg.row_anchor[cfg.cls_num_per_lane-1-point_num]/288)) - 1 ]
+						lane_points.append(lane_point)
+			else:
+				lanes_detected.append(False)
+
+			lanes_points.append(lane_points)
+		return lanes_points, np.array(lanes_detected)
+	
+
+	@staticmethod
+	def draw_lanes(input_img, lanes_points, lanes_detected, cfg, draw_points=True):
+		# Write the detected line points in the image
+		visualization_img = cv2.resize(input_img, (cfg.img_w, cfg.img_h), interpolation = cv2.INTER_AREA)
+
+		# Draw a mask for the current lane
+		if(lanes_detected[1] and lanes_detected[2]):
+			lane_segment_img = visualization_img.copy()
+			
+			cv2.fillPoly(lane_segment_img, pts = [np.vstack((lanes_points[1],np.flipud(lanes_points[2])))], color =(255,191,0))
+			visualization_img = cv2.addWeighted(visualization_img, 0.7, lane_segment_img, 0.3, 0)
+
+		if(draw_points):
+			for lane_num,lane_points in enumerate(lanes_points):
+				for lane_point in lane_points:
+					cv2.circle(visualization_img, (lane_point[0],lane_point[1]), 3, lane_colors[lane_num], -1)
+
+		return visualization_img
+
+
+	
+
+
+
+
+
+
+
