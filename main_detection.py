@@ -5,6 +5,7 @@ import time
 
 from ultrafastLaneDetector import UltrafastLaneDetector, ModelType
 
+# Model paths and settings
 model_path = "lanes/models/tusimple_18.pth"
 model_type = ModelType.TUSIMPLE
 use_gpu = True 
@@ -13,22 +14,7 @@ weights_only = True
 # Initialize lane detection model
 lane_detector = UltrafastLaneDetector(model_path, model_type, use_gpu)
 
-# Initialize webcam
-cap = cv2.VideoCapture(0)
-cv2.namedWindow("Detected lanes", cv2.WINDOW_NORMAL)
-
-while(True):
-    ret, frame = cap.read()
-
-    # Detect the lanes
-    output_img = lane_detector.detect_lanes(frame)
-
-    
-    cv2.imshow("Detected lanes", output_img)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-# Initialize the Arduino serial connection
+# Initialize Arduino serial connection
 SERIAL_PORT = '/dev/ttyACM0'  # Update with the correct port
 BAUD_RATE = 9600
 
@@ -52,18 +38,16 @@ last_detection_time = 0  # Tracks last detection time (seconds)
 
 def detect_stop_signs(frame):
     global last_detection_time
-
-    current_time = time.time()  # Get current time
-
-    # Ignore detection if it's within 5 seconds of the last one
+    current_time = time.time()
+    
     if current_time - last_detection_time < 5:
-        return  
-
+        return frame  # Skip detection if within 5 seconds of last one
+    
     resized_frame = cv2.resize(frame, (540, 260))
     rgb_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
     results = model(rgb_frame)
     detections = results.xyxy[0]
-
+    
     for *box, confidence, cls in detections:
         class_name = results.names[int(cls)]
         if class_name in TARGET_CLASSES:
@@ -80,15 +64,16 @@ def detect_stop_signs(frame):
                     time.sleep(2)  
                     arduino.write(b'GO\n')
                     print("Signal sent to Arduino: GO")
-                    last_detection_time = time.time()  # Update last detection time
+                    last_detection_time = time.time()
                 except Exception as e:
                     print(f"Error sending signal to Arduino: {e}")
             break
+    
+    return frame
 
+# Initialize video capture
 cap = cv2.VideoCapture(0)
-if not cap.isOpened():
-    print("Error: Unable to access video source.")
-    exit()
+cv2.namedWindow("Lane & Stop Sign Detection", cv2.WINDOW_NORMAL)
 
 print("Processing video input... (Press 'q' to quit)")
 
@@ -97,9 +82,15 @@ while True:
     if not ret:
         print("Error: Unable to read frame.")
         break
-
-    detect_stop_signs(frame)
-    cv2.imshow("Stop Sign Detection", frame)
+    
+    # Detect lanes
+    lanes_frame = lane_detector.detect_lanes(frame)
+    
+    # Detect stop signs
+    output_frame = detect_stop_signs(lanes_frame)
+    
+    # Display results
+    cv2.imshow("Lane & Stop Sign Detection", output_frame)
     
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
