@@ -1,11 +1,10 @@
 import cv2
 import numpy as np
-import vpi
 import serial
 import time
 
 # Initialize Arduino Serial Connection
-SERIAL_PORT = '/dev/ttyACM0'  # Update with your port
+SERIAL_PORT = '/dev/ttyACM0'
 BAUD_RATE = 9600
 
 try:
@@ -29,29 +28,28 @@ if not cap.isOpened():
 
 print("Processing video input... (Press 'q' to quit)")
 
-def process_frame_vpi(frame):
-    """ Uses NVIDIA VPI for Canny Edge Detection and Hough Transform. """
-    height, width = frame.shape[:2]
-
+# CUDA Edge Detection Function
+def process_frame_cuda(frame):
+    """ Uses OpenCV's CUDA functions for edge detection and Hough Line Transform. """
     # Convert frame to grayscale
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    # Create VPI Image from NumPy array (This should be correct VPI image handling)
-    vpi_image = vpi.Image.from_cpu(gray, vpi.Format.U8)  # Correct API usage here
+    # Upload image to GPU
+    gpu_gray = cv2.cuda_GpuMat()
+    gpu_gray.upload(gray)
 
-    # Use VPI for Canny Edge Detection
-    edges = vpi_image.canny(low_threshold=50, high_threshold=150)
+    # Canny edge detection using CUDA
+    gpu_edges = cv2.cuda.createCannyEdgeDetector(50, 150)
+    gpu_edges = gpu_edges.detect(gpu_gray)
 
-    # Convert back to NumPy array
-    edge_img = edges.cpu()
+    # Download the result from GPU
+    edge_img = gpu_edges.download()
 
-    # Use VPI for Hough Line Detection
-    hough_lines = vpi_image.hough_lines(rho=1, theta=np.pi / 180, threshold=50)
+    # Hough Line Transform using CUDA
+    lines = cv2.cuda.createHoughLineDetector(1, np.pi / 180, 50)
+    gpu_lines = lines.detect(gpu_edges)
 
-    # Convert lines to NumPy array
-    lines_np = hough_lines.cpu()
-
-    return edge_img, lines_np
+    return edge_img, gpu_lines
 
 def get_lane_center_offset(lines, frame_width):
     """ Calculate lane center offset from detected lines. """
@@ -62,23 +60,18 @@ def get_lane_center_offset(lines, frame_width):
     right_lines = []
     
     for line in lines:
-        rho, theta = line[0], line[1]
-        x1 = int(rho * np.cos(theta) + 1000 * (-np.sin(theta)))
-        y1 = int(rho * np.sin(theta) + 1000 * (np.cos(theta)))
-        x2 = int(rho * np.cos(theta) - 1000 * (-np.sin(theta)))
-        y2 = int(rho * np.sin(theta) - 1000 * (np.cos(theta)))
-
-        # Classify the lines
-        if x1 < frame_width // 2 and x2 < frame_width // 2:
-            left_lines.append((x1, x2))
-        elif x1 > frame_width // 2 and x2 > frame_width // 2:
-            right_lines.append((x1, x2))
+        x1, y1, x2, y2 = line[0]
+        x = (x1 + x2) // 2  # Find mid-point of line
+        if x < frame_width // 2:
+            left_lines.append(x)
+        else:
+            right_lines.append(x)
 
     if not left_lines or not right_lines:
         return None
 
-    left_x = np.mean([pt[0] for pt in left_lines])
-    right_x = np.mean([pt[0] for pt in right_lines])
+    left_x = np.mean(left_lines)
+    right_x = np.mean(right_lines)
     lane_center = (left_x + right_x) / 2
     return lane_center - (frame_width / 2)
 
@@ -105,12 +98,12 @@ while True:
 
     frame_width = frame.shape[1]
 
-    edge_img, lines = process_frame_vpi(frame)
+    edge_img, lines = process_frame_cuda(frame)
     offset = get_lane_center_offset(lines, frame_width)
     adjust_steering(offset)
 
     # Display the detected edges
-    cv2.imshow("Lane Detection (VPI)", edge_img)
+    cv2.imshow("Lane Detection (CUDA)", edge_img)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
