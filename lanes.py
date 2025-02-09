@@ -12,6 +12,7 @@ try:
     arduino = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
     time.sleep(2)
     print(f"Connected to Arduino on {SERIAL_PORT}")
+    time.sleep(7)
 except Exception as e:
     print(f"Error: Could not connect to Arduino: {e}")
     arduino = None
