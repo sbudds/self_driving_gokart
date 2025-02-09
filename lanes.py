@@ -36,20 +36,20 @@ def process_frame_vpi(frame):
     # Convert frame to grayscale
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    # Convert the NumPy array to a VPI image in CPU memory
-    with vpi.Image.from_cpu(gray, vpi.Format.U8) as vpi_gray:
-        # Use VPI for Canny Edge Detection
-        edges = vpi_gray.canny(low_threshold=50, high_threshold=150)
+    # Create VPI Image from NumPy array (This should be correct VPI image handling)
+    vpi_image = vpi.Image.from_cpu(gray, vpi.Format.U8)  # Correct API usage here
 
-        # Convert back to NumPy array
-        edge_img = edges.cpu()
+    # Use VPI for Canny Edge Detection
+    edges = vpi_image.canny(low_threshold=50, high_threshold=150)
+
+    # Convert back to NumPy array
+    edge_img = edges.cpu()
 
     # Use VPI for Hough Line Detection
-    with vpi.Image.from_cpu(edge_img, vpi.Format.U8) as vpi_edges:
-        hough_lines = vpi_edges.hough_lines(rho=1, theta=np.pi / 180, threshold=50)
+    hough_lines = vpi_image.hough_lines(rho=1, theta=np.pi / 180, threshold=50)
 
-        # Convert lines to NumPy array
-        lines_np = hough_lines.cpu()
+    # Convert lines to NumPy array
+    lines_np = hough_lines.cpu()
 
     return edge_img, lines_np
 
