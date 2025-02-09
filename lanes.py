@@ -40,7 +40,7 @@ def process_frame_vpi(frame):
     # Use VPI for Canny Edge Detection
     with vpi.Backend.CUDA:
         # Convert NumPy array to VPI image
-        with vpi.Image.from_array(gray, format=vpi.Format.U8) as vpi_gray:
+        with vpi.Image.from_numpy(gray, format=vpi.Format.U8) as vpi_gray:
             edges = vpi_gray.canny(low_threshold=50, high_threshold=150)
 
             # Convert back to NumPy array
@@ -48,7 +48,7 @@ def process_frame_vpi(frame):
 
     # Use VPI for Hough Line Detection
     with vpi.Backend.CUDA:
-        with vpi.Image.from_array(edge_img, format=vpi.Format.U8) as vpi_edges:
+        with vpi.Image.from_numpy(edge_img, format=vpi.Format.U8) as vpi_edges:
             hough_lines = vpi_edges.hough_lines(rho=1, theta=np.pi / 180, threshold=50)
 
             # Convert lines to NumPy array
