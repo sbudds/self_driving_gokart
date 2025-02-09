@@ -1,7 +1,6 @@
 import cv2
 import numpy as np
 import vpi
-import torch
 import serial
 import time
 
@@ -37,22 +36,20 @@ def process_frame_vpi(frame):
     # Convert frame to grayscale
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    # Use VPI for Canny Edge Detection
-    with vpi.Backend.CUDA:
-        # Convert NumPy array to VPI image
-        with vpi.Image.from_numpy(gray, format=vpi.Format.U8) as vpi_gray:
-            edges = vpi_gray.canny(low_threshold=50, high_threshold=150)
+    # Convert the NumPy array to a VPI image in CPU memory
+    with vpi.Image.from_cpu(gray, vpi.Format.U8) as vpi_gray:
+        # Use VPI for Canny Edge Detection
+        edges = vpi_gray.canny(low_threshold=50, high_threshold=150)
 
-            # Convert back to NumPy array
-            edge_img = edges.cpu()
+        # Convert back to NumPy array
+        edge_img = edges.cpu()
 
     # Use VPI for Hough Line Detection
-    with vpi.Backend.CUDA:
-        with vpi.Image.from_numpy(edge_img, format=vpi.Format.U8) as vpi_edges:
-            hough_lines = vpi_edges.hough_lines(rho=1, theta=np.pi / 180, threshold=50)
+    with vpi.Image.from_cpu(edge_img, vpi.Format.U8) as vpi_edges:
+        hough_lines = vpi_edges.hough_lines(rho=1, theta=np.pi / 180, threshold=50)
 
-            # Convert lines to NumPy array
-            lines_np = hough_lines.cpu()
+        # Convert lines to NumPy array
+        lines_np = hough_lines.cpu()
 
     return edge_img, lines_np
 
