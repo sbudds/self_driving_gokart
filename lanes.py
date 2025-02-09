@@ -1,15 +1,12 @@
 import cv2
+import numpy as np
+import vpi
 import torch
 import serial
 import time
-import numpy as np
-
-# Initialize CUDA device
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
 
 # Initialize Arduino Serial Connection
-SERIAL_PORT = '/dev/ttyACM0'  # Update with the correct port
+SERIAL_PORT = '/dev/ttyACM0'  # Update with your port
 BAUD_RATE = 9600
 
 try:
@@ -33,44 +30,63 @@ if not cap.isOpened():
 
 print("Processing video input... (Press 'q' to quit)")
 
-def preprocess_frame(frame):
-    """ Convert frame to grayscale and send to GPU as a tensor. """
-    frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    frame_tensor = torch.tensor(frame_gray, dtype=torch.float32, device=device) / 255.0
-    return frame_tensor
+def process_frame_vpi(frame):
+    """ Uses NVIDIA VPI for Canny Edge Detection and Hough Transform. """
+    height, width = frame.shape[:2]
 
-def detect_edges(frame_tensor):
-    """ Apply Sobel edge detection using CUDA tensors. """
-    sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32, device=device).unsqueeze(0).unsqueeze(0)
-    sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32, device=device).unsqueeze(0).unsqueeze(0)
+    # Convert frame to grayscale
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    frame_tensor = frame_tensor.unsqueeze(0).unsqueeze(0)  # Add batch and channel dimensions
-    edge_x = torch.nn.functional.conv2d(frame_tensor, sobel_x, padding=1)
-    edge_y = torch.nn.functional.conv2d(frame_tensor, sobel_y, padding=1)
+    # Use VPI for Canny Edge Detection
+    with vpi.Backend.CUDA:
+        with vpi.Image.from_cpu(gray) as vpi_gray:
+            edges = vpi_gray.convert(vpi.Format.U8)
+            edges = edges.canny(low_threshold=50, high_threshold=150)
 
-    edges = torch.sqrt(edge_x ** 2 + edge_y ** 2).squeeze()
-    edges = (edges > 0.2).float()  # Thresholding
-    return edges
+            # Convert back to NumPy array
+            edge_img = edges.cpu()
 
-def refine_lanes(edges):
-    """ Apply morphological operations to clean up lane lines. """
-    kernel = torch.ones((1, 5), dtype=torch.float32, device=device)  # 1x5 kernel
-    edges = torch.nn.functional.conv2d(edges.unsqueeze(0).unsqueeze(0), kernel.unsqueeze(0).unsqueeze(0), padding=(0, 2))
-    return edges.squeeze()
+    # Use VPI for Hough Line Detection
+    with vpi.Backend.CUDA:
+        with vpi.Image.from_cpu(edge_img) as vpi_edges:
+            hough_lines = vpi_edges.hough_lines(rho=1, theta=np.pi / 180, threshold=50)
 
-def get_lane_center_offset(edges, frame_width):
-    """ Calculate the lane center offset using lane pixel distribution. """
-    edges_np = edges.cpu().numpy()
-    y_indices, x_indices = np.where(edges_np > 0)
+            # Convert lines to NumPy array
+            lines_np = hough_lines.cpu()
 
-    if len(x_indices) == 0:
-        return None  # No lanes detected
+    return edge_img, lines_np
 
-    lane_center = np.mean(x_indices)
+def get_lane_center_offset(lines, frame_width):
+    """ Calculate lane center offset from detected lines. """
+    if lines is None or len(lines) == 0:
+        return None
+
+    left_lines = []
+    right_lines = []
+    
+    for line in lines:
+        rho, theta = line[0], line[1]
+        x1 = int(rho * np.cos(theta) + 1000 * (-np.sin(theta)))
+        y1 = int(rho * np.sin(theta) + 1000 * (np.cos(theta)))
+        x2 = int(rho * np.cos(theta) - 1000 * (-np.sin(theta)))
+        y2 = int(rho * np.sin(theta) - 1000 * (np.cos(theta)))
+
+        # Classify the lines
+        if x1 < frame_width // 2 and x2 < frame_width // 2:
+            left_lines.append((x1, x2))
+        elif x1 > frame_width // 2 and x2 > frame_width // 2:
+            right_lines.append((x1, x2))
+
+    if not left_lines or not right_lines:
+        return None
+
+    left_x = np.mean([pt[0] for pt in left_lines])
+    right_x = np.mean([pt[0] for pt in right_lines])
+    lane_center = (left_x + right_x) / 2
     return lane_center - (frame_width / 2)
 
 def adjust_steering(offset):
-    """ Adjust steering based on lane center offset. """
+    """ Adjust steering based on lane offset. """
     if offset is None:
         steering_angle = STEERING_CENTER  # Go straight if no lanes detected
     else:
@@ -91,16 +107,13 @@ while True:
         break
 
     frame_width = frame.shape[1]
-    
-    frame_tensor = preprocess_frame(frame)
-    edges = detect_edges(frame_tensor)
-    edges = refine_lanes(edges)
-    offset = get_lane_center_offset(edges, frame_width)
+
+    edge_img, lines = process_frame_vpi(frame)
+    offset = get_lane_center_offset(lines, frame_width)
     adjust_steering(offset)
 
-    # Convert edges back to an image for display
-    edges_np = (edges.cpu().numpy() * 255).astype(np.uint8)
-    cv2.imshow("Lane Detection", edges_np)
+    # Display the detected edges
+    cv2.imshow("Lane Detection (VPI)", edge_img)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
