@@ -5,10 +5,9 @@ import time
 import numpy as np
 from ultrafastLaneDetector import UltrafastLaneDetector, ModelType
 
-# Model and hardware setup
 model_path = "lanes/models/tusimple_18.pth"
 model_type = ModelType.TUSIMPLE
-use_gpu = True  
+use_gpu = True 
 weights_only = True
 
 # Initialize lane detection model
@@ -18,7 +17,7 @@ lane_detector = UltrafastLaneDetector(model_path, model_type, use_gpu)
 cap = cv2.VideoCapture(0)
 cv2.namedWindow("Detected lanes", cv2.WINDOW_NORMAL)
 
-# Initialize Arduino serial connection
+# Initialize the Arduino serial connection
 SERIAL_PORT = '/dev/ttyACM0'  # Update with the correct port
 BAUD_RATE = 9600
 
@@ -30,7 +29,7 @@ except Exception as e:
     print(f"Error: Could not connect to Arduino on {SERIAL_PORT}: {e}")
     arduino = None
 
-# Load YOLOv5 for stop sign detection
+# Load the YOLOv5 model with CUDA support
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"Using device: {device}")
 
@@ -40,14 +39,12 @@ model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True).to(devi
 TARGET_CLASSES = ['stop sign']
 last_detection_time = 0  # Tracks last detection time (seconds)
 
-# Steering limits
 STEERING_CENTER = 105
 STEERING_LEFT = 80
 STEERING_RIGHT = 130
 
 
 def detect_stop_signs(frame):
-    """Detects stop signs in the frame and signals Arduino to stop if detected."""
     global last_detection_time
     current_time = time.time()
 
@@ -81,16 +78,15 @@ def detect_stop_signs(frame):
             break
 
 
-def get_lane_center_offset(lanes_points):
-    """Calculates lane center offset based on detected lanes."""
+def get_lane_center_offset(lanes_points, frame_width=1280):
     if len(lanes_points) < 2:
-        return None  # Not enough lanes detected
+        return None
     
     left_lane = lanes_points[0]
     right_lane = lanes_points[1]
     
-    if not left_lane and not right_lane:
-        return None  # No valid lane data
+    if not left_lane or not right_lane:
+        return None
     
     left_x = np.mean([pt[0] for pt in left_lane]) if left_lane else None
     right_x = np.mean([pt[0] for pt in right_lane]) if right_lane else None
@@ -98,27 +94,22 @@ def get_lane_center_offset(lanes_points):
     if left_x is not None and right_x is not None:
         lane_center = (left_x + right_x) / 2
     elif left_x is not None:
-        lane_center = left_x + 100  # Estimate right lane
+        lane_center = left_x + 100
     elif right_x is not None:
-        lane_center = right_x - 100  # Estimate left lane
+        lane_center = right_x - 100
     else:
-        return None  # No reliable lane center
+        return None
     
-    return lane_center
+    frame_center = frame_width // 2
+    return lane_center - frame_center
 
 
 def adjust_steering(lanes_points):
-    """Adjusts steering based on lane center offset."""
-    lane_center = get_lane_center_offset(lanes_points)
-
-    if lane_center is None:
-        steering_angle = STEERING_CENTER  # Default to straight if no lanes are detected
-        print("No lanes detected, going straight.")
-    else:
-        frame_center = 640  # Assuming a 1280x720 resolution
-        offset = lane_center - frame_center  
-        steering_angle = STEERING_CENTER - int(offset * 0.1)  
-
+    offset = get_lane_center_offset(lanes_points)
+    if offset is None:
+        return
+    
+    steering_angle = STEERING_CENTER - int(offset * 0.05)
     steering_angle = max(STEERING_LEFT, min(STEERING_RIGHT, steering_angle))
     
     if arduino:
@@ -129,7 +120,7 @@ def adjust_steering(lanes_points):
             print(f"Error sending steering angle to Arduino: {e}")
 
 
-# Main loop
+cap = cv2.VideoCapture(0)
 if not cap.isOpened():
     print("Error: Unable to access video source.")
     exit()
@@ -142,12 +133,12 @@ while True:
         print("Error: Unable to read frame.")
         break
 
-    lanes_points, output_img = lane_detector.detect_lanes(frame)  # Get lane points
+    output_img = lane_detector.detect_lanes(frame)
     detect_stop_signs(frame)
-    adjust_steering(lanes_points)
-
+    adjust_steering(lane_detector.lanes_points)
+    
     cv2.imshow("Lane and Stop Sign Detection", output_img)
-
+    
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
