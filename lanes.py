@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-import vpi
+import torch
 import serial
 import time
 
@@ -10,10 +10,10 @@ BAUD_RATE = 9600
 
 try:
     arduino = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-    time.sleep(2)
+    time.sleep(4)
     print(f"Connected to Arduino on {SERIAL_PORT}")
 except Exception as e:
-    print(f"Error: Could not connect to Arduino on {SERIAL_PORT}: {e}")
+    print(f"Error: Could not connect to Arduino: {e}")
     arduino = None
 
 # Steering Angles
@@ -29,72 +29,50 @@ if not cap.isOpened():
 
 print("Processing video input... (Press 'q' to quit)")
 
-def process_frame_vpi(frame):
-    """ Process the frame using GPU-accelerated VPI operations """
-    frame_height, frame_width = frame.shape[:2]
+def tensor_canny_hough(frame):
+    """CUDA-accelerated edge detection and Hough transform using PyTorch"""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    with vpi.Backend.CUDA:
-        with vpi.Image.from_host(frame, vpi.Format.RGB8) as vpi_frame:
-            # Convert to grayscale
-            vpi_gray = vpi_frame.convert(vpi.Format.U8, backend=vpi.Backend.CUDA)
+    # Convert frame to grayscale and normalize
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) / 255.0
+    tensor_img = torch.tensor(gray, dtype=torch.float32, device=device).unsqueeze(0).unsqueeze(0)
 
-            # Apply Gaussian Blur
-            vpi_blurred = vpi_gray.gaussian_filter(kernel_size=5, backend=vpi.Backend.CUDA)
+    # Sobel filter for edge detection (Canny alternative)
+    sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32, device=device).view(1, 1, 3, 3)
+    sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32, device=device).view(1, 1, 3, 3)
 
-            # Sobel Edge Detection (faster than Canny)
-            vpi_edges = vpi_blurred.sobel_filter(backend=vpi.Backend.CUDA)
+    edge_x = torch.nn.functional.conv2d(tensor_img, sobel_x, padding=1)
+    edge_y = torch.nn.functional.conv2d(tensor_img, sobel_y, padding=1)
+    edges = torch.sqrt(edge_x**2 + edge_y**2).squeeze().cpu().numpy()
 
-            # Convert edges back to NumPy (small data transfer)
-            edges = vpi_edges.cpu()
+    # Apply thresholding
+    edges = (edges > 0.3).astype(np.uint8) * 255
 
-    # Apply threshold to detect lane lines
-    _, binary_edges = cv2.threshold(edges, 50, 255, cv2.THRESH_BINARY)
+    # Perform Hough Transform on GPU
+    edge_tensor = torch.tensor(edges, dtype=torch.float32, device=device)
+    return edges, detect_lane_lines(edge_tensor, frame.shape[1])
 
-    # Define ROI mask (only process bottom half of the image)
-    mask = np.zeros_like(binary_edges)
-    roi_vertices = np.array([[(0, frame_height), (frame_width, frame_height), 
-                              (frame_width//2, frame_height//2)]], dtype=np.int32)
-    cv2.fillPoly(mask, roi_vertices, 255)
-    masked_edges = cv2.bitwise_and(binary_edges, mask)
+def detect_lane_lines(edge_tensor, width):
+    """Extract left and right lane lines from edge tensor using GPU calculations"""
+    y_indices, x_indices = torch.where(edge_tensor > 0)
+    if len(x_indices) == 0:
+        return None
 
-    # Fit lines using a fast CUDA-based regression (avoid HoughLinesP bottleneck)
-    left_line, right_line = fit_lines_cuda(masked_edges)
+    left_x = x_indices[x_indices < width // 2].float().mean() if torch.any(x_indices < width // 2) else None
+    right_x = x_indices[x_indices >= width // 2].float().mean() if torch.any(x_indices >= width // 2) else None
 
-    return masked_edges, left_line, right_line
+    if left_x is None or right_x is None:
+        return None
 
+    lane_center = (left_x + right_x) / 2
+    return lane_center.item() - (width / 2)
 
-def fit_lines_cuda(edge_img):
-    """ Custom CUDA-based line fitting to avoid HoughLinesP bottlenecks """
-    # Convert edge image to points
-    points = np.column_stack(np.where(edge_img > 0))
-
-    if len(points) < 50:  # No significant lane detected
-        return None, None
-
-    # Split left and right lanes
-    mid_x = edge_img.shape[1] // 2
-    left_points = points[points[:, 1] < mid_x]
-    right_points = points[points[:, 1] >= mid_x]
-
-    # Fit lines using NumPy for now (can be replaced with CUDA kernel)
-    left_line = np.polyfit(left_points[:, 0], left_points[:, 1], 1) if len(left_points) > 10 else None
-    right_line = np.polyfit(right_points[:, 0], right_points[:, 1], 1) if len(right_points) > 10 else None
-
-    return left_line, right_line
-
-
-def adjust_steering(left_line, right_line, frame_width):
-    """ Adjust steering based on detected lane lines """
-    if left_line is None and right_line is None:
+def adjust_steering(offset):
+    """Adjust steering based on lane offset"""
+    if offset is None:
         steering_angle = STEERING_CENTER
-    elif left_line is None:
-        steering_angle = STEERING_RIGHT
-    elif right_line is None:
-        steering_angle = STEERING_LEFT
     else:
-        # Find the midpoint between detected lanes
-        lane_center = (np.polyval(left_line, frame_width//2) + np.polyval(right_line, frame_width//2)) / 2
-        steering_angle = STEERING_CENTER - int((lane_center - frame_width//2) * 0.05)
+        steering_angle = STEERING_CENTER - int(offset * 0.05)
         steering_angle = max(STEERING_LEFT, min(STEERING_RIGHT, steering_angle))
 
     if arduino:
@@ -102,7 +80,7 @@ def adjust_steering(left_line, right_line, frame_width):
             arduino.write(f'{steering_angle}\n'.encode())
             print(f"Steering angle sent: {steering_angle}")
         except Exception as e:
-            print(f"Error sending steering angle to Arduino: {e}")
+            print(f"Error sending steering angle: {e}")
 
 while True:
     ret, frame = cap.read()
@@ -110,16 +88,10 @@ while True:
         print("Error: Unable to read frame.")
         break
 
-    frame_width = frame.shape[1]
+    edges, offset = tensor_canny_hough(frame)
+    adjust_steering(offset)
 
-    # Use CUDA-optimized lane detection
-    edge_img, left_line, right_line = process_frame_vpi(frame)
-
-    # Adjust the car's steering
-    adjust_steering(left_line, right_line, frame_width)
-
-    # Display results
-    cv2.imshow("Lane Detection (CUDA Optimized)", edge_img)
+    cv2.imshow("Lane Detection (CUDA)", edges)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
