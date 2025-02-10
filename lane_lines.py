@@ -151,16 +151,12 @@ def main():
         self.lane_center = lane_center
 
         # Draw lane lines on the frame.
-        # Define lane colors (BGR)
         lane_colors = [(0, 0, 255), (0, 255, 0), (255, 0, 0), (0, 255, 255)]
         for i, lane in enumerate(lanes_points):
-            # Only draw if there are detected points.
             if lane.numel() > 0:
-                # Transfer lane points from GPU to CPU for drawing.
                 lane_cpu = lane.detach().cpu().numpy()
                 points = []
                 for point in lane_cpu:
-                    # Convert the floating-point coordinates to integer pixel values.
                     x, y = int(point[0]), int(point[1])
                     points.append((x, y))
                     cv2.circle(frame, (x, y), 5, lane_colors[i % len(lane_colors)], -1)
@@ -206,8 +202,11 @@ def main():
     # Additional throttling parameters:
     ANGLE_CHANGE_THRESHOLD = 2      # Only send command if angle changes by more than 2 degrees
     NO_LANE_UPDATE_INTERVAL = 1.0     # In seconds, update less frequently when no lanes are detected
+    MAX_UPDATE_INTERVAL = 0.5         # Force update if more than 0.5 seconds have passed since the last command
+
     last_no_lane_time = time.time()
     last_sent_angle = STEERING_CENTER
+    last_command_time = time.time()   # Track time of the last command sent
 
     print("[Main] Processing video input... (Press 'q' to quit)")
     frame_count = 0
@@ -251,18 +250,24 @@ def main():
             last_correction = correction
             last_steering_angle = steering_angle
 
+            current_time = time.time()
             # Throttle and filter serial commands:
             if lane_detector.lanes_detected.any():
-                # If lanes are detected, send the command only if the angle changes significantly.
-                if abs(steering_angle - last_sent_angle) >= ANGLE_CHANGE_THRESHOLD:
+                # If lanes are detected, send the command if:
+                # 1. The angle change is significant, OR
+                # 2. More than MAX_UPDATE_INTERVAL seconds have elapsed since the last command.
+                if (abs(steering_angle - last_sent_angle) >= ANGLE_CHANGE_THRESHOLD or 
+                    (current_time - last_command_time) > MAX_UPDATE_INTERVAL):
                     steering_queue.put(steering_angle)
                     last_sent_angle = steering_angle
+                    last_command_time = current_time
             else:
-                # If no lanes detected, throttle the update interval.
-                if time.time() - last_no_lane_time > NO_LANE_UPDATE_INTERVAL:
+                # If no lanes are detected, throttle the update interval.
+                if current_time - last_no_lane_time > NO_LANE_UPDATE_INTERVAL:
                     steering_queue.put(STEERING_CENTER)
                     last_sent_angle = STEERING_CENTER
-                    last_no_lane_time = time.time()
+                    last_no_lane_time = current_time
+                    last_command_time = current_time
 
             prev_steering_angle = steering_angle
 
