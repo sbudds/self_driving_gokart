@@ -3,6 +3,7 @@ import torch
 import serial
 import time
 import numpy as np
+import multiprocessing
 from multiprocessing import Process, Queue
 from ultrafastLaneDetector import UltrafastLaneDetector, ModelType
 
@@ -29,7 +30,7 @@ class PIDController:
         self.kp = kp
         self.ki = ki
         self.kd = kd
-        self.set_point = set_point  # target error = 0
+        self.set_point = set_point  # target error = 0 (centered)
         self.prev_error = 0.0
         self.integral = 0.0
         self.last_time = time.time()
@@ -62,16 +63,16 @@ def get_lane_center_offset(lanes_points, lanes_detected, frame_width):
 
 # --- Stop Sign Detection Process ---
 def stop_sign_detection_process(frame_queue, serial_port, stop_interval, stop_duration):
-    # Load YOLO model in this process
+    # Load YOLO model in this subprocess.
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     yolo_model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True).to(device)
     TARGET_CLASSES = ['stop sign']
     last_stop_sign_time = 0
 
-    # Initialize serial connection here too (if required)
+    # Initialize serial connection for stop sign commands.
     try:
         arduino = serial.Serial(serial_port, 9600, timeout=1)
-        time.sleep(4)  # wait for initialization
+        time.sleep(4)  # allow Arduino to initialize
         print(f"[StopSignProc] Connected to Arduino on {serial_port}")
     except Exception as e:
         print(f"[StopSignProc] Error connecting to Arduino: {e}")
@@ -79,7 +80,7 @@ def stop_sign_detection_process(frame_queue, serial_port, stop_interval, stop_du
 
     while True:
         current_time = time.time()
-        # Only process a frame if enough time has passed since the last detection
+        # Only process if enough time has passed since the last detection.
         if current_time - last_stop_sign_time < stop_interval:
             time.sleep(0.1)
             continue
@@ -88,10 +89,9 @@ def stop_sign_detection_process(frame_queue, serial_port, stop_interval, stop_du
             time.sleep(0.01)
             continue
 
-        # Get the latest frame from the queue (discard older frames if queue is large)
+        # Retrieve the latest frame from the queue.
         frame = frame_queue.get()
 
-        # Preprocess for YOLO: resize and convert color
         try:
             resized_frame = cv2.resize(frame, (540, 260))
             rgb_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
@@ -117,7 +117,7 @@ def stop_sign_detection_process(frame_queue, serial_port, stop_interval, stop_du
                     print("[StopSignProc] Sent STOP to Arduino")
                 except Exception as e:
                     print(f"[StopSignProc] Error sending STOP: {e}")
-            # Schedule GO command after STOP_DURATION seconds (nonblocking)
+            # Wait non-blockingly for STOP_DURATION seconds before sending GO.
             time.sleep(stop_duration)
             if arduino:
                 try:
@@ -125,26 +125,25 @@ def stop_sign_detection_process(frame_queue, serial_port, stop_interval, stop_du
                     print("[StopSignProc] Sent GO to Arduino")
                 except Exception as e:
                     print(f"[StopSignProc] Error sending GO: {e}")
-        # Minimal sleep to avoid busy waiting
         time.sleep(0.01)
 
 # --- Main Process Setup ---
 def main():
-    # Lane Detector (unchanged)
+    # Initialize the lane detection model (UltrafastLaneDetector remains untouched)
     model_path = "lanes/models/tusimple_18.pth"
     model_type = ModelType.TUSIMPLE
     use_gpu = True
     lane_detector = UltrafastLaneDetector(model_path, model_type, use_gpu)
 
-    # Video capture setup
+    # Video capture setup.
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
-        print("Error: Unable to access video source.")
+        print("[Main] Error: Unable to access video source.")
         return
     cv2.namedWindow("Lane and Stop Sign Detection", cv2.WINDOW_NORMAL)
 
-    # Set up Arduino serial (for steering) in the main process
-    SERIAL_PORT = '/dev/ttyACM0'  # update as needed
+    # Initialize Arduino serial connection for steering.
+    SERIAL_PORT = '/dev/ttyACM0'  # Update if needed.
     try:
         arduino = serial.Serial(SERIAL_PORT, 9600, timeout=1)
         time.sleep(4)
@@ -153,33 +152,34 @@ def main():
         print(f"[Main] Error connecting to Arduino: {e}")
         arduino = None
 
-    # Create a queue for sending frames to the stop sign process
-    frame_queue = Queue(maxsize=5)  # fixed size to avoid memory buildup
+    # Create a multiprocessing Queue for frames to be processed by the YOLO process.
+    frame_queue = Queue(maxsize=5)
 
-    # Start the stop sign detection process
-    stop_process = Process(target=stop_sign_detection_process,
-                           args=(frame_queue, SERIAL_PORT, STOP_DETECTION_INTERVAL, STOP_DURATION))
+    # Start the stop sign detection subprocess.
+    stop_process = Process(
+        target=stop_sign_detection_process,
+        args=(frame_queue, SERIAL_PORT, STOP_DETECTION_INTERVAL, STOP_DURATION)
+    )
     stop_process.daemon = True
     stop_process.start()
 
-    # Initialize PID controller and variables for steering
+    # Initialize PID controller and variables for steering.
     pid = PIDController(KP, KI, KD)
     prev_steering_angle = STEERING_CENTER
     frame_width = lane_detector.cfg.img_w
 
     print("[Main] Processing video input... (Press 'q' to quit)")
-
     while True:
         ret, frame = cap.read()
         if not ret:
             print("[Main] Error: Unable to read frame.")
             break
 
-        # Send a copy of the frame to the YOLO process if queue is not full
+        # Send a copy of the frame to the YOLO process if the queue is not full.
         if not frame_queue.full():
             frame_queue.put(frame.copy())
 
-        # Lane detection and steering (this should be fast since it uses GPU inference)
+        # Lane detection and steering.
         output_img = lane_detector.detect_lanes(frame)
         lanes_points = lane_detector.lanes_points
         lanes_detected = lane_detector.lanes_detected
@@ -192,22 +192,20 @@ def main():
             new_steering_angle = STEERING_CENTER
             pid.integral = 0
 
-        # Smooth the steering angle to reduce jitter
-        steering_angle = int((1 - STEERING_SMOOTHING) * new_steering_angle +
-                             STEERING_SMOOTHING * prev_steering_angle)
+        # Smooth the steering angle to reduce jitter.
+        steering_angle = int(
+            (1 - STEERING_SMOOTHING) * new_steering_angle +
+            STEERING_SMOOTHING * prev_steering_angle
+        )
         prev_steering_angle = steering_angle
         steering_angle = max(STEERING_LEFT, min(STEERING_RIGHT, steering_angle))
 
-        # Send steering command to Arduino (minimize frequency if necessary)
         if arduino:
             try:
                 arduino.write(f'{steering_angle}\n'.encode())
-                # (Optional) remove or limit print statements here to reduce overhead
-                # print(f"[Main] Steering angle sent: {steering_angle}")
             except Exception as e:
                 print(f"[Main] Error sending steering angle: {e}")
 
-        # Display the lane detection result
         cv2.imshow("Lane and Stop Sign Detection", output_img)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
@@ -218,4 +216,6 @@ def main():
         arduino.close()
 
 if __name__ == "__main__":
+    # Set the multiprocessing start method to 'spawn' so CUDA initializes properly.
+    multiprocessing.set_start_method('spawn')
     main()
