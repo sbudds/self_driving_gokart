@@ -40,8 +40,9 @@ def process_frame_to_gpu(frame):
 # CUDA edge detection (Canny)
 def canny_edge_detection(gpu_frame):
     gpu_gray = cv2.cuda.cvtColor(gpu_frame, cv2.COLOR_BGR2GRAY)  # Convert to grayscale on GPU
-    gpu_blurred = cv2.cuda.GaussianBlur(gpu_gray, (5, 5), 0)     # Gaussian blur on GPU
-    gpu_edges = cv2.cuda.Canny(gpu_blurred, 50, 150)              # Canny edge detection on GPU
+    # Gaussian blur on GPU using createGaussianFilter
+    gpu_blurred = cv2.cuda.createGaussianFilter(gpu_gray, -1, (5, 5), 0).apply(gpu_gray)
+    gpu_edges = cv2.cuda.Canny(gpu_blurred, 50, 150)  # Canny edge detection on GPU
     return gpu_edges
 
 # CUDA Hough Transform for line detection
