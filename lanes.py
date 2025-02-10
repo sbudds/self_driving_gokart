@@ -19,7 +19,7 @@ def slope(x1, x2, y1, y2):
 def setup_serial():
     """Initialize serial communication with the Arduino."""
     arduino = serial.Serial('/dev/ttyACM0', 9600, timeout=1)
-    time.sleep(2)  # Allow time for connection to establish
+    time.sleep(7)  # Allow time for Arduino to fully initialize
     return arduino
 
 def control_steering(arduino, command):
@@ -27,7 +27,7 @@ def control_steering(arduino, command):
     Send the steering command to the Arduino.
     command: a string representing the servo angle ("80", "105", or "130").
     """
-    arduino.write(command.encode())
+    arduino.write(command.encode())  # Send the command to Arduino
     print(f"Sent steering command: {command}")
 
 # Set up video capture and Arduino connection.
