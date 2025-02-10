@@ -1,12 +1,36 @@
 import cv2
 import torch
-import serial
 import time
 import numpy as np
 import threading
 import queue
 import types
+import Jetson.GPIO as GPIO
 from ultrafastLaneDetector import UltrafastLaneDetector, ModelType
+
+###########################
+# GPIO/Servo SETUP (Using Jetson.GPIO)
+###########################
+
+# Define the servo control parameters.
+# Typical hobby servos expect a pulse width of ~1ms to 2ms (5%-10% duty cycle at 50Hz).
+# We assume STEERING_CENTER = 105, STEERING_LEFT = 80, STEERING_RIGHT = 130.
+# Mapping: 105 -> 7.5% duty, 80 -> ~5%, 130 -> ~10%
+SERVO_PIN = 12        # Update if needed.
+PWM_FREQUENCY = 50    # 50 Hz (period of 20ms)
+
+def angle_to_duty(angle):
+    """Convert a steering angle into a PWM duty cycle."""
+    # Center at 105 corresponds to 7.5% duty cycle.
+    return 7.5 + (angle - 105) * 0.1
+
+# Setup GPIO using BOARD numbering.
+GPIO.setmode(GPIO.BOARD)
+GPIO.setup(SERVO_PIN, GPIO.OUT)
+servo_pwm = GPIO.PWM(SERVO_PIN, PWM_FREQUENCY)
+STEERING_CENTER = 105
+servo_pwm.start(angle_to_duty(STEERING_CENTER))
+
 
 ###########################
 # GPU-BASED HELPER FUNCTIONS
@@ -14,11 +38,11 @@ from ultrafastLaneDetector import UltrafastLaneDetector, ModelType
 
 def gpu_image_transform(frame):
     """
-    Convert an OpenCV frame (BGR) to a normalized tensor on GPU.
+    Convert an OpenCV BGR frame to a normalized tensor on GPU.
     The lane detector expects an image of size (288, 800) in RGB.
     """
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    img_tensor = torch.from_numpy(frame_rgb).float().cuda() / 255.0  # shape: (H, W, 3)
+    img_tensor = torch.from_numpy(frame_rgb).float().cuda() / 255.0
     img_tensor = img_tensor.permute(2, 0, 1).unsqueeze(0)
     img_tensor = torch.nn.functional.interpolate(img_tensor, size=(288, 800),
                                                  mode='bilinear', align_corners=False)
@@ -30,12 +54,10 @@ def gpu_image_transform(frame):
 def gpu_process_output(output, cfg):
     """
     Process the lane detector model's output entirely on the GPU.
-    Returns a tuple of (lanes_points, lanes_detected, lane_center) where:
-      - lanes_points is a list of torch tensors (one per lane) with shape (N,2),
-        each row being an (x,y) point.
-      - lanes_detected is a boolean tensor (one value per lane).
-      - lane_center is a scalar tensor containing the overall average x–coordinate
-        of all detected lanes (used for computing the offset).
+    Returns:
+      - lanes_points: list of torch tensors (one per lane) with shape (N, 2)
+      - lanes_detected: a boolean tensor (one per lane)
+      - lane_center: scalar tensor for the overall average x–coordinate of detected lanes
     """
     with torch.no_grad():
         processed_output = torch.flip(output[0], dims=[1])
@@ -105,29 +127,7 @@ class PIDController:
         return output
 
 ###########################
-# Arduino Writer Thread
-###########################
-
-def arduino_writer(arduino, steering_queue):
-    while True:
-        angle = steering_queue.get()
-        if angle is None:  # Sentinel value to shut down the thread.
-            break
-        # Drain any extra pending angles to only send the latest value.
-        while not steering_queue.empty():
-            try:
-                angle = steering_queue.get_nowait()
-            except queue.Empty:
-                break
-        try:
-            arduino.write(f'{angle}\n'.encode())
-            arduino.flush()  # Ensure the data is immediately sent out.
-            time.sleep(0.05)  # Small delay (50ms) to give Arduino time to process.
-        except Exception as e:
-            print(f"[Arduino] Error sending steering angle: {e}")
-
-###########################
-# MAIN PROGRAM: LANE DETECTION & STEERING
+# MAIN PROGRAM: LANE DETECTION & SERVO STEERING
 ###########################
 
 def main():
@@ -173,22 +173,6 @@ def main():
         return
     cv2.namedWindow("Lane Detection", cv2.WINDOW_NORMAL)
 
-    SERIAL_PORT = '/dev/ttyACM0'  # Update as needed.
-    try:
-        # Use 115200 baud (adjust as necessary)
-        arduino = serial.Serial(SERIAL_PORT, 115200, timeout=1)
-        time.sleep(4)
-        print(f"[Main] Connected to Arduino on {SERIAL_PORT}")
-    except Exception as e:
-        print(f"[Main] Error connecting to Arduino: {e}")
-        arduino = None
-
-    # Start Arduino writer thread.
-    steering_queue = queue.Queue()
-    if arduino:
-        arduino_thread = threading.Thread(target=arduino_writer, args=(arduino, steering_queue), daemon=True)
-        arduino_thread.start()
-
     pid = PIDController(0.1, 0.005, 0.05)
     STEERING_CENTER = 105
     STEERING_LEFT = 80
@@ -196,21 +180,18 @@ def main():
     prev_steering_angle = STEERING_CENTER
     frame_width = lane_detector.cfg.img_w
 
-    # Define how often (in frames) we update the steering command.
-    PID_UPDATE_INTERVAL = 3
-
-    # Additional throttling parameters:
-    ANGLE_CHANGE_THRESHOLD = 2      # Only send command if angle changes by more than 2 degrees
-    NO_LANE_UPDATE_INTERVAL = 1.0     # In seconds, update less frequently when no lanes are detected
-    MAX_UPDATE_INTERVAL = 0.5         # Force update if more than 0.5 seconds have passed since the last command
+    # PID and servo update parameters.
+    PID_UPDATE_INTERVAL = 3           # Update PID every 3 frames.
+    ANGLE_CHANGE_THRESHOLD = 2        # Only update servo if angle changes by >2°.
+    NO_LANE_UPDATE_INTERVAL = 1.0       # When no lanes detected, update less frequently.
+    MAX_UPDATE_INTERVAL = 0.5           # Force an update if >0.5 sec since last command.
 
     last_no_lane_time = time.time()
     last_sent_angle = STEERING_CENTER
-    last_command_time = time.time()   # Track time of the last command sent
+    last_command_time = time.time()
 
     print("[Main] Processing video input... (Press 'q' to quit)")
     frame_count = 0
-    # Variables to store the latest steering values (for visualization)
     last_lane_center = frame_width / 2.0
     last_offset = 0.0
     last_correction = 0.0
@@ -223,18 +204,16 @@ def main():
             print("[Main] Error: Unable to read frame.")
             break
 
-        # Get the output frame with lane lines drawn.
+        # Process lane detection and draw lane lines.
         with torch.no_grad():
             output_img = lane_detector.detect_lanes(frame)
 
-        # Only update the PID and send steering commands every PID_UPDATE_INTERVAL frames.
+        # Update the PID and servo commands every PID_UPDATE_INTERVAL frames.
         if frame_count % PID_UPDATE_INTERVAL == 0:
             try:
                 lane_center = lane_detector.lane_center
             except AttributeError:
                 lane_center = torch.tensor(frame_width / 2.0, device='cuda')
-            
-            # Compute the horizontal offset (forcing a small GPU->CPU sync for one scalar)
             offset = (lane_center - torch.tensor(frame_width / 2.0, device=lane_center.device)).item()
             correction = pid.update(offset)
             new_steering_angle = STEERING_CENTER + correction
@@ -244,34 +223,34 @@ def main():
                                  STEERING_SMOOTHING * prev_steering_angle)
             steering_angle = max(STEERING_LEFT, min(STEERING_RIGHT, steering_angle))
             
-            # Save these values for visualization.
+            # Save values for visualization.
             last_lane_center = lane_center.item()
             last_offset = offset
             last_correction = correction
             last_steering_angle = steering_angle
 
             current_time = time.time()
-            # Throttle and filter serial commands:
+            # Throttle updates:
             if lane_detector.lanes_detected.any():
-                # If lanes are detected, send the command if:
-                # 1. The angle change is significant, OR
-                # 2. More than MAX_UPDATE_INTERVAL seconds have elapsed since the last command.
+                # When lanes are detected, update if the angle changes significantly or if too much time has passed.
                 if (abs(steering_angle - last_sent_angle) >= ANGLE_CHANGE_THRESHOLD or 
                     (current_time - last_command_time) > MAX_UPDATE_INTERVAL):
-                    steering_queue.put(steering_angle)
+                    duty = angle_to_duty(steering_angle)
+                    servo_pwm.ChangeDutyCycle(duty)
                     last_sent_angle = steering_angle
                     last_command_time = current_time
             else:
-                # If no lanes are detected, throttle the update interval.
+                # When no lanes are detected, update at a slower rate with the neutral command.
                 if current_time - last_no_lane_time > NO_LANE_UPDATE_INTERVAL:
-                    steering_queue.put(STEERING_CENTER)
+                    duty = angle_to_duty(STEERING_CENTER)
+                    servo_pwm.ChangeDutyCycle(duty)
                     last_sent_angle = STEERING_CENTER
                     last_no_lane_time = current_time
                     last_command_time = current_time
 
             prev_steering_angle = steering_angle
 
-        # Overlay the computed steering details on the output image.
+        # Overlay debugging text on the video feed.
         cv2.putText(output_img, f"Lane Center: {last_lane_center:.2f}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
         cv2.putText(output_img, f"Offset: {last_offset:.2f}", (10, 60),
@@ -285,15 +264,10 @@ def main():
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
-        # Optionally: adjust CUDA cache clearing.
-        # if frame_count % 100 == 0:
-        #     torch.cuda.empty_cache()
-
     cap.release()
     cv2.destroyAllWindows()
-    if arduino:
-        steering_queue.put(None)  # Signal the Arduino thread to shut down.
-        arduino.close()
+    servo_pwm.stop()
+    GPIO.cleanup()
 
 if __name__ == "__main__":
     main()
