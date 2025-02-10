@@ -60,7 +60,7 @@ def gpu_process_output(output, cfg):
         else:
             lane_center = torch.tensor(cfg.img_w / 2.0, device=processed_output.device)
         
-        # Optional: Prepare lane points for visualization.
+        # Prepare lane points for visualization.
         row_anchor = torch.tensor(cfg.row_anchor, device=processed_output.device, dtype=torch.float32)
         y_coords = cfg.img_h * (row_anchor.flip(0) / 288.0) - 1.0
         
@@ -133,7 +133,7 @@ def main():
     lane_detector.img_transform = gpu_image_transform
     lane_detector.process_output = gpu_process_output
 
-    # Monkey-patch detect_lanes to store GPU results.
+    # Monkey-patch detect_lanes to store GPU results and draw lane lines.
     def detect_lanes_wrapper(self, frame):
         input_tensor = self.img_transform(frame).unsqueeze(0)
         output = self.model(input_tensor)
@@ -141,7 +141,26 @@ def main():
         self.lanes_points = lanes_points
         self.lanes_detected = lanes_detected
         self.lane_center = lane_center
-        return frame  # Return original frame for visualization.
+
+        # Draw lane lines on the frame.
+        # Define lane colors (BGR)
+        lane_colors = [(0, 0, 255), (0, 255, 0), (255, 0, 0), (0, 255, 255)]
+        for i, lane in enumerate(lanes_points):
+            # Only draw if there are detected points.
+            if lane.numel() > 0:
+                # Transfer lane points from GPU to CPU for drawing.
+                lane_cpu = lane.detach().cpu().numpy()
+                points = []
+                for point in lane_cpu:
+                    # Convert the floating-point coordinates to integer pixel values.
+                    x, y = int(point[0]), int(point[1])
+                    points.append((x, y))
+                    cv2.circle(frame, (x, y), 5, lane_colors[i % len(lane_colors)], -1)
+                if len(points) >= 2:
+                    cv2.polylines(frame, [np.array(points, dtype=np.int32)], isClosed=False,
+                                  color=lane_colors[i % len(lane_colors)], thickness=2)
+        return frame
+
     lane_detector.detect_lanes = types.MethodType(detect_lanes_wrapper, lane_detector)
 
     cap = cv2.VideoCapture(0)
@@ -177,6 +196,12 @@ def main():
 
     print("[Main] Processing video input... (Press 'q' to quit)")
     frame_count = 0
+    # Variables to store the latest steering values (for visualization)
+    last_lane_center = frame_width / 2.0
+    last_offset = 0.0
+    last_correction = 0.0
+    last_steering_angle = STEERING_CENTER
+
     while True:
         frame_count += 1
         ret, frame = cap.read()
@@ -184,6 +209,7 @@ def main():
             print("[Main] Error: Unable to read frame.")
             break
 
+        # Get the output frame with lane lines drawn.
         with torch.no_grad():
             output_img = lane_detector.detect_lanes(frame)
 
@@ -205,8 +231,24 @@ def main():
             prev_steering_angle = steering_angle
             steering_angle = max(STEERING_LEFT, min(STEERING_RIGHT, steering_angle))
             
+            # Save these values for visualization.
+            last_lane_center = lane_center.item()
+            last_offset = offset
+            last_correction = correction
+            last_steering_angle = steering_angle
+
             if arduino:
                 steering_queue.put(steering_angle)
+
+        # Overlay the computed steering details on the output image.
+        cv2.putText(output_img, f"Lane Center: {last_lane_center:.2f}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(output_img, f"Offset: {last_offset:.2f}", (10, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(output_img, f"PID Correction: {last_correction:.2f}", (10, 90),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(output_img, f"Steering Angle: {last_steering_angle}", (10, 120),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
         cv2.imshow("Lane Detection", output_img)
         if cv2.waitKey(1) & 0xFF == ord('q'):
