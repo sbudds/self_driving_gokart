@@ -126,7 +126,6 @@ def arduino_writer(arduino, steering_queue):
         except Exception as e:
             print(f"[Arduino] Error sending steering angle: {e}")
 
-
 ###########################
 # MAIN PROGRAM: LANE DETECTION & STEERING
 ###########################
@@ -180,6 +179,7 @@ def main():
 
     SERIAL_PORT = '/dev/ttyACM0'  # Update as needed.
     try:
+        # Use 115200 baud (adjust as necessary)
         arduino = serial.Serial(SERIAL_PORT, 115200, timeout=1)
         time.sleep(4)
         print(f"[Main] Connected to Arduino on {SERIAL_PORT}")
@@ -202,6 +202,12 @@ def main():
 
     # Define how often (in frames) we update the steering command.
     PID_UPDATE_INTERVAL = 3
+
+    # Additional throttling parameters:
+    ANGLE_CHANGE_THRESHOLD = 2      # Only send command if angle changes by more than 2 degrees
+    NO_LANE_UPDATE_INTERVAL = 1.0     # In seconds, update less frequently when no lanes are detected
+    last_no_lane_time = time.time()
+    last_sent_angle = STEERING_CENTER
 
     print("[Main] Processing video input... (Press 'q' to quit)")
     frame_count = 0
@@ -237,7 +243,6 @@ def main():
             STEERING_SMOOTHING = 0.2
             steering_angle = int((1 - STEERING_SMOOTHING) * new_steering_angle +
                                  STEERING_SMOOTHING * prev_steering_angle)
-            prev_steering_angle = steering_angle
             steering_angle = max(STEERING_LEFT, min(STEERING_RIGHT, steering_angle))
             
             # Save these values for visualization.
@@ -246,8 +251,20 @@ def main():
             last_correction = correction
             last_steering_angle = steering_angle
 
-            if arduino:
-                steering_queue.put(steering_angle)
+            # Throttle and filter serial commands:
+            if lane_detector.lanes_detected.any():
+                # If lanes are detected, send the command only if the angle changes significantly.
+                if abs(steering_angle - last_sent_angle) >= ANGLE_CHANGE_THRESHOLD:
+                    steering_queue.put(steering_angle)
+                    last_sent_angle = steering_angle
+            else:
+                # If no lanes detected, throttle the update interval.
+                if time.time() - last_no_lane_time > NO_LANE_UPDATE_INTERVAL:
+                    steering_queue.put(STEERING_CENTER)
+                    last_sent_angle = STEERING_CENTER
+                    last_no_lane_time = time.time()
+
+            prev_steering_angle = steering_angle
 
         # Overlay the computed steering details on the output image.
         cv2.putText(output_img, f"Lane Center: {last_lane_center:.2f}", (10, 30),
@@ -263,7 +280,7 @@ def main():
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
-        # Optionally: remove or adjust CUDA cache clearing.
+        # Optionally: adjust CUDA cache clearing.
         # if frame_count % 100 == 0:
         #     torch.cuda.empty_cache()
 
