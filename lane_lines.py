@@ -113,10 +113,19 @@ def arduino_writer(arduino, steering_queue):
         angle = steering_queue.get()
         if angle is None:  # Sentinel value to shut down the thread.
             break
+        # Drain any extra pending angles to only send the latest value.
+        while not steering_queue.empty():
+            try:
+                angle = steering_queue.get_nowait()
+            except queue.Empty:
+                break
         try:
             arduino.write(f'{angle}\n'.encode())
+            arduino.flush()  # Ensure the data is immediately sent out.
+            time.sleep(0.05)  # Small delay (50ms) to give Arduino time to process.
         except Exception as e:
             print(f"[Arduino] Error sending steering angle: {e}")
+
 
 ###########################
 # MAIN PROGRAM: LANE DETECTION & STEERING
