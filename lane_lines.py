@@ -180,7 +180,7 @@ def main():
 
     SERIAL_PORT = '/dev/ttyACM0'  # Update as needed.
     try:
-        arduino = serial.Serial(SERIAL_PORT, 9600, timeout=1)
+        arduino = serial.Serial(SERIAL_PORT, 115200, timeout=1)
         time.sleep(4)
         print(f"[Main] Connected to Arduino on {SERIAL_PORT}")
     except Exception as e:
