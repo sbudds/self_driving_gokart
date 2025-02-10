@@ -3,8 +3,6 @@ import torch
 import serial
 import time
 import numpy as np
-import multiprocessing
-from multiprocessing import Process, Queue
 from ultrafastLaneDetector import UltrafastLaneDetector, ModelType
 
 ###########################
@@ -13,39 +11,31 @@ from ultrafastLaneDetector import UltrafastLaneDetector, ModelType
 
 def gpu_image_transform_pil(pil_img):
     """
-    Convert a PIL image (in RGB) to a normalized tensor entirely on GPU.
-    The model expects input of size (288, 800).
+    Convert a PIL image (in RGB) to a normalized tensor on GPU.
+    The lane detector expects an image of size (288, 800).
     """
-    # Convert PIL image to numpy array (this step is on CPU, but minimal)
+    # Minimal conversion: PIL -> NumPy (on CPU) is unavoidable,
+    # but all heavy processing happens on GPU.
     img_np = np.array(pil_img)  # shape: (H, W, 3) in RGB
-    img_tensor = torch.from_numpy(img_np).float().cuda() / 255.0
-    img_tensor = img_tensor.permute(2, 0, 1).unsqueeze(0)  # shape: (1,3,H,W)
+    img_tensor = torch.from_numpy(img_np).float().cuda() / 255.0  # [0,1] float tensor on GPU
+    # Change shape to (1, 3, H, W)
+    img_tensor = img_tensor.permute(2, 0, 1).unsqueeze(0)
+    # Resize on GPU to (288, 800)
     img_tensor = torch.nn.functional.interpolate(img_tensor, size=(288, 800),
                                                  mode='bilinear', align_corners=False)
+    # Normalize using standard mean and std (broadcasted on GPU)
     mean = torch.tensor([0.485, 0.456, 0.406], device=img_tensor.device).view(1, 3, 1, 1)
     std  = torch.tensor([0.229, 0.224, 0.225], device=img_tensor.device).view(1, 3, 1, 1)
     img_tensor = (img_tensor - mean) / std
-    return img_tensor.squeeze(0)  # shape: (3, 288, 800)
-
-def gpu_preprocess_frame(frame):
-    """
-    Convert an OpenCV BGR frame to an RGB tensor on GPU, resized to (260, 540) for YOLO.
-    """
-    # Convert from BGR to RGB by slicing; this is cheap.
-    frame_rgb = frame[..., ::-1]
-    img_tensor = torch.from_numpy(frame_rgb).float().cuda() / 255.0
-    img_tensor = img_tensor.permute(2, 0, 1).unsqueeze(0)
-    img_tensor = torch.nn.functional.interpolate(img_tensor, size=(260, 540),
-                                                 mode='bilinear', align_corners=False)
-    return img_tensor
+    return img_tensor.squeeze(0)  # return shape: (3, 288, 800)
 
 def gpu_process_output(output, cfg):
     """
-    Process the lane detector model's output entirely on GPU.
-    This example closely mimics the original processing:
+    Process the lane detector output entirely on GPU.
+    This function mimics the original post-processing:
       - Flips the tensor,
       - Applies softmax,
-      - Computes a weighted sum.
+      - Computes a weighted sum over lane grid indices.
     """
     processed_output = torch.flip(output[0], dims=[1])
     prob = torch.nn.functional.softmax(processed_output[:-1, :, :], dim=0)
@@ -56,7 +46,7 @@ def gpu_process_output(output, cfg):
     return loc
 
 ###########################
-# PID CONTROLLER (lightweight)
+# PID CONTROLLER (Lightweight)
 ###########################
 
 class PIDController:
@@ -64,7 +54,7 @@ class PIDController:
         self.kp = kp
         self.ki = ki
         self.kd = kd
-        self.set_point = set_point  # target error = 0
+        self.set_point = set_point  # Target: lane center exactly at frame center
         self.prev_error = 0.0
         self.integral = 0.0
         self.last_time = time.time()
@@ -84,12 +74,13 @@ class PIDController:
 
 def get_lane_center_offset(lanes_points, lanes_detected, frame_width):
     """
-    Compute the offset from the frame center using the lane points.
-    (Since the number of points is small, this is done on CPU.)
+    Compute the horizontal offset (in pixels) between the detected lane center
+    and the center of the frame.
     """
     available_points = []
     for idx, detected in enumerate(lanes_detected):
         if detected and lanes_points[idx]:
+            # Compute the average x-coordinate for this lane
             lane_x_avg = np.mean([pt[0] for pt in lanes_points[idx]])
             available_points.append(lane_x_avg)
     if available_points:
@@ -99,99 +90,33 @@ def get_lane_center_offset(lanes_points, lanes_detected, frame_width):
         return None
 
 ###########################
-# STOP SIGN DETECTION PROCESS (GPU-based pre-processing)
-###########################
-
-def stop_sign_detection_process(frame_queue, serial_port, stop_interval, stop_duration):
-    # Load YOLOv5 model on GPU in this subprocess.
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    yolo_model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True).to(device)
-    TARGET_CLASSES = ['stop sign']
-    last_stop_sign_time = 0
-    frame_count = 0
-
-    try:
-        arduino = serial.Serial(serial_port, 9600, timeout=1)
-        time.sleep(4)  # allow Arduino to initialize
-        print(f"[StopSignProc] Connected to Arduino on {serial_port}")
-    except Exception as e:
-        print(f"[StopSignProc] Error connecting to Arduino: {e}")
-        arduino = None
-
-    while True:
-        frame_count += 1
-        current_time = time.time()
-        if current_time - last_stop_sign_time < stop_interval:
-            time.sleep(0.1)
-            continue
-
-        if frame_queue.empty():
-            time.sleep(0.01)
-            continue
-
-        frame = frame_queue.get()
-        try:
-            input_tensor = gpu_preprocess_frame(frame)
-        except Exception as e:
-            continue
-
-        with torch.no_grad():
-            results = yolo_model(input_tensor)
-        # Minimal data transfer to CPU for detection loop:
-        detections = results.xyxy[0].detach().cpu().numpy()
-
-        stop_sign_found = False
-        for *box, confidence, cls in detections:
-            class_name = results.names[int(cls)]
-            if class_name in TARGET_CLASSES:
-                stop_sign_found = True
-                print(f"[StopSignProc] Stop sign detected (conf: {confidence:.2f})")
-                break
-
-        if stop_sign_found:
-            last_stop_sign_time = time.time()
-            if arduino:
-                try:
-                    arduino.write(b'STOP\n')
-                    print("[StopSignProc] Sent STOP to Arduino")
-                except Exception as e:
-                    print(f"[StopSignProc] Error sending STOP: {e}")
-            time.sleep(stop_duration)
-            if arduino:
-                try:
-                    arduino.write(b'GO\n')
-                    print("[StopSignProc] Sent GO to Arduino")
-                except Exception as e:
-                    print(f"[StopSignProc] Error sending GO: {e}")
-        if frame_count % 100 == 0:
-            torch.cuda.empty_cache()
-        time.sleep(0.01)
-
-###########################
-# MAIN PROCESS SETUP
+# MAIN PROGRAM: LANE DETECTION & STEERING
 ###########################
 
 def main():
+    # Wait 7 seconds for system and GPU initialization.
     print("[Main] Waiting 7 seconds for system initialization...")
     time.sleep(7)
-    
-    # Initialize lane detection model.
-    model_path = "lanes/models/tusimple_18.pth"
+
+    # Initialize the lane detection model.
+    model_path = "lanes/models/tusimple_18.pth"  # Update path if needed.
     model_type = ModelType.TUSIMPLE
     use_gpu = True
     lane_detector = UltrafastLaneDetector(model_path, model_type, use_gpu)
-    
-    # Override the image transform and output processing with our GPU-based versions.
+
+    # Override the image transformation and output processing with our GPU-based versions.
     lane_detector.img_transform = gpu_image_transform_pil
     lane_detector.process_output = gpu_process_output
 
+    # Set up video capture.
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("[Main] Error: Unable to access video source.")
         return
-    cv2.namedWindow("Lane and Stop Sign Detection", cv2.WINDOW_NORMAL)
+    cv2.namedWindow("Lane Detection", cv2.WINDOW_NORMAL)
 
-    SERIAL_PORT = '/dev/ttyACM0'  # Update if needed.
+    # Initialize Arduino connection for steering commands.
+    SERIAL_PORT = '/dev/ttyACM0'  # Update port if necessary.
     try:
         arduino = serial.Serial(SERIAL_PORT, 9600, timeout=1)
         time.sleep(4)
@@ -200,23 +125,16 @@ def main():
         print(f"[Main] Error connecting to Arduino: {e}")
         arduino = None
 
-    frame_queue = Queue(maxsize=5)
-    stop_process = Process(
-        target=stop_sign_detection_process,
-        args=(frame_queue, SERIAL_PORT, 5, 2)
-    )
-    stop_process.daemon = True
-    stop_process.start()
-
+    # Set up PID controller for steering.
     pid = PIDController(0.1, 0.005, 0.05)
-    STEERING_CENTER = 105
-    STEERING_LEFT = 80
-    STEERING_RIGHT = 130
+    STEERING_CENTER = 105  # Neutral steering angle.
+    STEERING_LEFT = 80     # Maximum left.
+    STEERING_RIGHT = 130   # Maximum right.
     prev_steering_angle = STEERING_CENTER
-    frame_width = lane_detector.cfg.img_w
-    frame_count = 0
+    frame_width = lane_detector.cfg.img_w  # Expected frame width (e.g., 1280).
 
     print("[Main] Processing video input... (Press 'q' to quit)")
+    frame_count = 0
     while True:
         frame_count += 1
         ret, frame = cap.read()
@@ -224,12 +142,11 @@ def main():
             print("[Main] Error: Unable to read frame.")
             break
 
-        if not frame_queue.full():
-            frame_queue.put(frame.copy())
+        # Run lane detection on the current frame.
+        with torch.no_grad():
+            output_img = lane_detector.detect_lanes(frame)
 
-        # Run lane detection.
-        output_img = lane_detector.detect_lanes(frame)
-        # (Assuming lane_detector.lanes_points and lanes_detected are updated accordingly)
+        # Retrieve lane points and detection flags.
         try:
             lanes_points = lane_detector.lanes_points
             lanes_detected = lane_detector.lanes_detected
@@ -237,6 +154,7 @@ def main():
             lanes_points = [[], [], [], []]
             lanes_detected = [False, False, False, False]
 
+        # Compute the lane center offset (on CPU; very little data).
         offset = get_lane_center_offset(lanes_points, lanes_detected, frame_width)
         if offset is not None:
             correction = pid.update(offset)
@@ -245,22 +163,26 @@ def main():
             new_steering_angle = STEERING_CENTER
             pid.integral = 0
 
+        # Apply smoothing to reduce jitter.
         STEERING_SMOOTHING = 0.2
         steering_angle = int((1 - STEERING_SMOOTHING) * new_steering_angle +
                              STEERING_SMOOTHING * prev_steering_angle)
         prev_steering_angle = steering_angle
         steering_angle = max(STEERING_LEFT, min(STEERING_RIGHT, steering_angle))
 
+        # Send the steering command to the Arduino.
         if arduino:
             try:
                 arduino.write(f'{steering_angle}\n'.encode())
             except Exception as e:
                 print(f"[Main] Error sending steering angle: {e}")
 
-        cv2.imshow("Lane and Stop Sign Detection", output_img)
+        # Display the lane detection output.
+        cv2.imshow("Lane Detection", output_img)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
+        # Optionally clear the CUDA cache every 100 frames.
         if frame_count % 100 == 0:
             torch.cuda.empty_cache()
 
@@ -270,5 +192,4 @@ def main():
         arduino.close()
 
 if __name__ == "__main__":
-    multiprocessing.set_start_method('spawn')
     main()
