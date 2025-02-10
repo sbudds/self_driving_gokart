@@ -120,7 +120,6 @@ def adjust_steering(lanes_points):
             print(f"Error sending steering angle to Arduino: {e}")
 
 
-cap = cv2.VideoCapture(0)
 if not cap.isOpened():
     print("Error: Unable to access video source.")
     exit()
