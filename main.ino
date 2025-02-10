@@ -16,7 +16,7 @@ void setup() {
   pinMode(IN2, OUTPUT);
 
   // Start serial communication
-  Serial.begin(9600);
+  Serial.begin(115200);
 
   // Initialize motor in the forward direction by default
   digitalWrite(IN1, HIGH);
