@@ -1,131 +1,210 @@
-#!/usr/bin/env python3
-import math
 import cv2
+import torch
+import scipy.special
 import numpy as np
-import time
-import serial
+import torchvision
+import torchvision.transforms as transforms
+from PIL import Image
+from enum import Enum
+from scipy.spatial.distance import cdist
 
-def slope(x1, x2, y1, y2):
-    """
-    Calculate the slope angle (in degrees) of a line segment given by (x1, y1) to (x2, y2).
-    Returns 0 if the line is vertical.
-    """
-    if (x2 - x1) == 0:
-        return 0
-    m = float(y2 - y1) / float(x2 - x1)
-    theta = math.atan(m)
-    return theta * (180 / np.pi)
+from ultrafastLaneDetector.model import parsingNet
 
-def setup_serial():
-    """Initialize serial communication with the Arduino."""
-    arduino = serial.Serial('/dev/ttyACM0', 9600, timeout=1)
-    time.sleep(7)  # Allow time for Arduino to fully initialize
-    return arduino
+lane_colors = [(0,0,255),(0,255,0),(255,0,0),(0,255,255)]
 
-def control_steering(arduino, command):
-    """
-    Send the steering command to the Arduino.
-    command: a string representing the servo angle ("80", "105", or "130").
-    """
-    arduino.write(command.encode())  # Send the command to Arduino
-    arduino.write(b'\n')  # Add newline for Arduino to detect end of command
-    print(f"Sent steering command: {command}")
-    time.sleep(0.2)  # Small delay to ensure Arduino receives and processes the command
+tusimple_row_anchor = [ 64,  68,  72,  76,  80,  84,  88,  92,  96, 100, 104, 108, 112,
+			116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156, 160, 164,
+			168, 172, 176, 180, 184, 188, 192, 196, 200, 204, 208, 212, 216,
+			220, 224, 228, 232, 236, 240, 244, 248, 252, 256, 260, 264, 268,
+			272, 276, 280, 284]
+culane_row_anchor = [121, 131, 141, 150, 160, 170, 180, 189, 199, 209, 219, 228, 238, 248, 258, 267, 277, 287]
 
-# Set up video capture and Arduino connection.
-cap = cv2.VideoCapture(0)
-arduino = setup_serial()
 
-# State flags (optional) to avoid sending duplicate commands repeatedly.
-a = b = c = 1
+class ModelType(Enum):
+	TUSIMPLE = 0
+	CULANE = 1
 
-while cap.isOpened():
-    ret, img = cap.read()
-    if not ret:
-        break
+class ModelConfig():
 
-    # Resize for consistent processing.
-    img = cv2.resize(img, (600, 600))
+	def __init__(self, model_type):
 
-    # --- GPU Processing ---
-    # Upload frame to GPU.
-    gpu_img = cv2.cuda_GpuMat()
-    gpu_img.upload(img)
+		if model_type == ModelType.TUSIMPLE:
+			self.init_tusimple_config()
+		else:
+			self.init_culane_config()
 
-    # Convert to grayscale on the GPU.
-    gpu_gray = cv2.cuda.cvtColor(gpu_img, cv2.COLOR_BGR2GRAY)
+	def init_tusimple_config(self):
+		self.img_w = 1280
+		self.img_h = 720
+		self.row_anchor = tusimple_row_anchor
+		self.griding_num = 100
+		self.cls_num_per_lane = 56
 
-    # Equalize histogram on the GPU.
-    gpu_eq = cv2.cuda.equalizeHist(gpu_gray)
+	def init_culane_config(self):
+		self.img_w = 1640
+		self.img_h = 590
+		self.row_anchor = culane_row_anchor
+		self.griding_num = 200
+		self.cls_num_per_lane = 18
 
-    # Apply Gaussian blur on the GPU (using a 5x5 kernel).
-    gaussian_filter = cv2.cuda.createGaussianFilter(cv2.CV_8UC1, cv2.CV_8UC1, (5, 5), 0)
-    gpu_blur = gaussian_filter.apply(gpu_eq)
+class UltrafastLaneDetector():
 
-    # Apply binary threshold on the GPU.
-    # Use a threshold of 240 so that only the brightest (white) pixels remain.
-    retval, gpu_thresh = cv2.cuda.threshold(gpu_blur, 240, 255, cv2.THRESH_BINARY)
+	def __init__(self, model_path, model_type=ModelType.TUSIMPLE, use_gpu=False):
 
-    # Download the thresholded image back to CPU.
-    thresh = gpu_thresh.download()
-    # ---------------------
+		self.use_gpu = use_gpu
 
-    # (Optional) Draw contours for debugging.
-    contours, hierarchy = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(thresh, contours, -1, (255, 0, 0), 3)
+		# Load model configuration based on the model type
+		self.cfg = ModelConfig(model_type)
 
-    # Use GPU-based Hough Segment Detector to detect lines.
-    # Parameters: rho=1, theta=pi/180, threshold=25, minLineLength=10, maxLineGap=40.
-    detector = cv2.cuda.createHoughSegmentDetector(1, np.pi/180, 25, 10, 40)
-    gpu_lines = detector.detect(gpu_thresh)
-    lines = gpu_lines.download() if gpu_lines is not None else None
+		# Initialize model
+		self.model = self.initialize_model(model_path, self.cfg, use_gpu)
 
-    # Initialize counters for left and right lane lines.
-    l = 0
-    r = 0
+		# Initialize image transformation
+		self.img_transform = self.initialize_image_transform()
 
-    if lines is not None:
-        for line in lines:
-            # Each line is represented as [x1, y1, x2, y2].
-            for x1, y1, x2, y2 in line:
-                if round(x2 - x1) == 0:
-                    continue  # Skip vertical lines to avoid division by zero.
-                ang = slope(x1, x2, y1, y2)
-                # Process only lines in a region of interest (y between 250 and 600).
-                if 250 < y1 < 600 and 250 < y2 < 600:
-                    # If the slope angle is between -80 and -30, count it as a right lane.
-                    if -80 <= round(ang) <= -30:
-                        r += 1
-                        # Draw line for debugging.
-                        cv2.line(img, (x1, y1), (x2, y2), (0, 255, 0), 2, cv2.LINE_AA)
-                    # If the slope angle is between 30 and 80, count it as a left lane.
-                    if 30 <= round(ang) <= 80:
-                        l += 1
-                        # Draw line for debugging.
-                        cv2.line(img, (x1, y1), (x2, y2), (0, 255, 0), 2, cv2.LINE_AA)
+	@staticmethod
+	def initialize_model(model_path, cfg, use_gpu):
 
-    # Decision-making based on the counters.
-    # (State flags a, b, c help prevent resending the same command repeatedly.)
-    if l >= 10 and a == 1:
-        print("Detected left lane markers; steering left.")
-        control_steering(arduino, "80")    # Send left turn command.
-        a = 0; b = 1; c = 1
-    elif r >= 10 and b == 1:
-        print("Detected right lane markers; steering right.")
-        control_steering(arduino, "130")   # Send right turn command.
-        a = 1; b = 0; c = 1
-    elif l < 10 and r < 10 and c == 1:
-        print("No clear lane markers; steering straight.")
-        control_steering(arduino, "105")   # Send straight command.
-        a = 1; b = 1; c = 0
+		# Load the model architecture
+		net = parsingNet(pretrained = False, backbone='18', cls_dim = (cfg.griding_num+1,cfg.cls_num_per_lane,4),
+						use_aux=False) # we dont need auxiliary segmentation in testing
 
-    # Display images for debugging.
-    cv2.imshow("Threshold", thresh)
-    cv2.imshow("Detected Lines", img)
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+		# Load the weights from the downloaded model
+		if use_gpu:
+			if torch.backends.mps.is_built():
+				net = net.to("mps")
+				state_dict = torch.load(model_path, map_location='mps')['model'] # Apple GPU
+			else:
+				net = net.cuda()
+				state_dict = torch.load(model_path, map_location='cuda')['model'] # CUDA
+		else:
+			state_dict = torch.load(model_path, map_location='cpu')['model'] # CPU
 
-cap.release()
-cv2.destroyAllWindows()
-arduino.close()
+		compatible_state_dict = {}
+		for k, v in state_dict.items():
+			if 'module.' in k:
+				compatible_state_dict[k[7:]] = v
+			else:
+				compatible_state_dict[k] = v
+
+		# Load the weights into the model
+		net.load_state_dict(compatible_state_dict, strict=False)
+		net.eval()
+
+		return net
+
+	@staticmethod
+	def initialize_image_transform():
+		# Create transfom operation to resize and normalize the input images
+		img_transforms = transforms.Compose([
+			transforms.Resize((288, 800)),
+			transforms.ToTensor(),
+			transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+		])
+
+		return img_transforms
+
+	def detect_lanes(self, image, draw_points=True):
+
+		input_tensor = self.prepare_input(image)
+
+		# Perform inference on the image
+		output = self.inference(input_tensor)
+
+		# Process output data
+		self.lanes_points, self.lanes_detected = self.process_output(output, self.cfg)
+
+		# Draw depth image
+		visualization_img = self.draw_lanes(image, self.lanes_points, self.lanes_detected, self.cfg, draw_points)
+
+		return visualization_img
+
+	def prepare_input(self, img):
+		# Transform the image for inference
+		img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+		img_pil = Image.fromarray(img)
+		input_img = self.img_transform(img_pil)
+		input_tensor = input_img[None, ...]
+
+		if self.use_gpu:
+			if not torch.backends.mps.is_built():
+				input_tensor = input_tensor.cuda()
+
+		return input_tensor
+
+	def inference(self, input_tensor):
+		with torch.no_grad():
+			output = self.model(input_tensor)
+
+		return output
+
+
+	@staticmethod
+	def process_output(output, cfg):		
+		# Parse the output of the model
+		processed_output = output[0].data.cpu().numpy()
+		processed_output = processed_output[:, ::-1, :]
+		prob = scipy.special.softmax(processed_output[:-1, :, :], axis=0)
+		idx = np.arange(cfg.griding_num) + 1
+		idx = idx.reshape(-1, 1, 1)
+		loc = np.sum(prob * idx, axis=0)
+		processed_output = np.argmax(processed_output, axis=0)
+		loc[processed_output == cfg.griding_num] = 0
+		processed_output = loc
+
+
+		col_sample = np.linspace(0, 800 - 1, cfg.griding_num)
+		col_sample_w = col_sample[1] - col_sample[0]
+
+		lanes_points = []
+		lanes_detected = []
+
+		max_lanes = processed_output.shape[1]
+		for lane_num in range(max_lanes):
+			lane_points = []
+			# Check if there are any points detected in the lane
+			if np.sum(processed_output[:, lane_num] != 0) > 2:
+
+				lanes_detected.append(True)
+
+				# Process each of the points for each lane
+				for point_num in range(processed_output.shape[0]):
+					if processed_output[point_num, lane_num] > 0:
+						lane_point = [int(processed_output[point_num, lane_num] * col_sample_w * cfg.img_w / 800) - 1, int(cfg.img_h * (cfg.row_anchor[cfg.cls_num_per_lane-1-point_num]/288)) - 1 ]
+						lane_points.append(lane_point)
+			else:
+				lanes_detected.append(False)
+
+			lanes_points.append(lane_points)
+		return lanes_points, np.array(lanes_detected)
+	
+
+	@staticmethod
+	def draw_lanes(input_img, lanes_points, lanes_detected, cfg, draw_points=True):
+		# Write the detected line points in the image
+		visualization_img = cv2.resize(input_img, (cfg.img_w, cfg.img_h), interpolation = cv2.INTER_AREA)
+
+		# Draw a mask for the current lane
+		if(lanes_detected[1] and lanes_detected[2]):
+			lane_segment_img = visualization_img.copy()
+			
+			cv2.fillPoly(lane_segment_img, pts = [np.vstack((lanes_points[1],np.flipud(lanes_points[2])))], color =(255,191,0))
+			visualization_img = cv2.addWeighted(visualization_img, 0.7, lane_segment_img, 0.3, 0)
+
+		if(draw_points):
+			for lane_num,lane_points in enumerate(lanes_points):
+				for lane_point in lane_points:
+					cv2.circle(visualization_img, (lane_point[0],lane_point[1]), 3, lane_colors[lane_num], -1)
+
+		return visualization_img
+
+
+	
+
+
+
+
+
+
+
