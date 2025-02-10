@@ -3,18 +3,34 @@ import math
 import cv2
 import numpy as np
 import time
+import serial
 
-# Function to calculate slope
+# Function to calculate slope (this will run on the CPU since it is not a GPU-accelerated operation)
 def slope(vx1, vx2, vy1, vy2):
-    m = float(vy2 - vy1) / float(vx2 - vx1)  # Slope equation
+    m = float(vy2 - vy1) / float(vx2 - x1)  # Slope equation
     theta1 = math.atan(m)  # Calculate the slope angle
     return theta1 * (180 / np.pi)  # Return the calculated angle in degrees
 
 # Set up the video capture
 cap = cv2.VideoCapture(0)
 
+# Set up serial communication with Arduino
+def setup_serial():
+    arduino = serial.Serial('/dev/ttyACM0', 9600, timeout=1)
+    time.sleep(2)  # Wait for the serial connection to establish
+    return arduino
+
+# Send the steering angle to Arduino
+def control_steering(arduino, angle):
+    mapped_angle = 105 + angle * 25  # The multiplier is adjusted for smoother control
+    mapped_angle = np.clip(mapped_angle, 80, 130)  # Limit the steering angle between 80 and 130
+    steering_command = str(int(mapped_angle))  # Convert the angle to a string
+    arduino.write(steering_command.encode())  # Send the steering command to Arduino
+    print(f"Sent steering angle: {steering_command}")
+
 # Initialize variables
 a = b = c = 1
+arduino = setup_serial()  # Set up serial communication
 
 while cap.isOpened():
     ret, img = cap.read()
@@ -39,7 +55,7 @@ while cap.isOpened():
     # Download the result back to CPU for contour finding (GPU contour is not available)
     thresh = gpu_thresh.download()
 
-    # Find contours
+    # Find contours (only CPU operation)
     contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
     # Draw the contours (CPU-based)
@@ -52,6 +68,8 @@ while cap.isOpened():
     gpu_lines = cv2.cuda.HoughLinesP(gpu_thresh, 1, np.pi / 180, 25, minLineLength=10, maxLineGap=40)
     lines = gpu_lines.download()  # Download lines to CPU
 
+    left_x = []
+    right_x = []
     l = r = 0
     for line in lines:
         for x1, y1, x2, y2 in line:
@@ -60,18 +78,41 @@ while cap.isOpened():
 
                 if 250 < y1 < 600 and 250 < y2 < 600:
                     # Left lane lines
-                    if round(arctan) >= -80 and round(arctan) <= -30:
+                    if -80 <= round(arctan) <= -30:
                         r += 1
                         l = 0
                         cv2.line(img, (x1, y1), (x2, y2), (0, 255, 0), 2, cv2.LINE_AA)
+                        left_x.append((x1 + x2) / 2)  # Store x positions of left lane lines
 
                     # Right lane lines
-                    if round(arctan) >= 30 and round(arctan) <= 80:
+                    if 30 <= round(arctan) <= 80:
                         l += 1
                         r = 0
                         cv2.line(img, (x1, y1), (x2, y2), (0, 255, 0), 2, cv2.LINE_AA)
+                        right_x.append((x1 + x2) / 2)  # Store x positions of right lane lines
 
-    # Decision-making based on detected lines
+    # Calculate the steering angle with proportional control
+    if left_x and right_x:
+        left_avg_x = np.mean(left_x)
+        right_avg_x = np.mean(right_x)
+        center_x = (left_avg_x + right_avg_x) / 2  # Calculate the center of the lanes
+        frame_center = img.shape[1] / 2  # The center of the frame
+
+        # Calculate the error from the center
+        error = center_x - frame_center
+        steering_angle = -error * 0.01  # Adjust multiplier for smoother control
+
+        # Send the steering angle to Arduino
+        control_steering(arduino, steering_angle)
+    else:
+        print('No lane detected, keeping straight...')
+        control_steering(arduino, 0)  # Keep the car straight if no lanes are detected
+
+    # Display the results
+    cv2.imshow('Thresholded Image', thresh)
+    cv2.imshow('Detected Lines', img)
+
+    # Decision making based on detected lines
     if l >= 10 and a == 1:
         print('left')
         a = 0
@@ -88,12 +129,9 @@ while cap.isOpened():
         b = 1
         c = 0
 
-    # Display the results
-    cv2.imshow('Thresholded Image', thresh)
-    cv2.imshow('Detected Lines', img)
-
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
 cap.release()
 cv2.destroyAllWindows()
+arduino.close()  # Close the serial connection when done
