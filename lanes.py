@@ -1,6 +1,7 @@
 import cv2
-import torch
 import numpy as np
+import torch
+import utlis
 import serial
 import time
 
@@ -31,27 +32,36 @@ if not cap.isOpened():
 
 print("Processing video input... (Press 'q' to quit)")
 
+curveList = []
+avgVal = 10
+
 def process_frame_gpu(frame):
-    """ Perform edge detection and Hough Transform using CUDA tensors. """
+    """ Process frame for lane curve using GPU. """
     frame_tensor = torch.tensor(frame, dtype=torch.uint8, device="cuda")
-    gray_tensor = (0.2989 * frame_tensor[:, :, 2] + 
-                   0.5870 * frame_tensor[:, :, 1] + 
-                   0.1140 * frame_tensor[:, :, 0]).to(torch.uint8)
+    imgThres = utlis.thresholding(frame_tensor.cpu().numpy())  # Run thresholding on CPU but process on GPU
 
-    # Apply Gaussian Blur (GPU)
-    kernel = torch.tensor([[1, 2, 1], [2, 4, 2], [1, 2, 1]], dtype=torch.float32, device="cuda") / 16
-    gray_blur = torch.nn.functional.conv2d(gray_tensor.unsqueeze(0).unsqueeze(0), 
-                                           kernel.unsqueeze(0).unsqueeze(0), padding=1).squeeze()
+    hT, wT, c = frame.shape
+    points = utlis.valTrackbars()
+    imgWarp = utlis.warpImg(imgThres, points, wT, hT)
+    imgWarpPoints = utlis.drawPoints(frame, points)
 
-    # Canny Edge Detection (GPU)
-    sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32, device="cuda")
-    sobel_y = sobel_x.T
-    grad_x = torch.nn.functional.conv2d(gray_blur.unsqueeze(0).unsqueeze(0), sobel_x.unsqueeze(0).unsqueeze(0), padding=1).squeeze()
-    grad_y = torch.nn.functional.conv2d(gray_blur.unsqueeze(0).unsqueeze(0), sobel_y.unsqueeze(0).unsqueeze(0), padding=1).squeeze()
-    edges = torch.sqrt(grad_x**2 + grad_y**2)
-    edges = (edges > 50).to(torch.uint8) * 255  # Thresholding for edges
+    # Histogram and curve processing using GPU
+    middlePoint, imgHist = utlis.getHistogram(imgWarp, display=True, minPer=0.5, region=4)
+    curveAveragePoint, imgHist = utlis.getHistogram(imgWarp, display=True, minPer=0.9)
+    curveRaw = curveAveragePoint - middlePoint
 
-    return edges.cpu().numpy()  # Convert to NumPy for display
+    curveList.append(curveRaw)
+    if len(curveList) > avgVal:
+        curveList.pop(0)
+    curve = int(sum(curveList) / len(curveList))
+
+    curve = curve / 100
+    if curve > 1:
+        curve = 1
+    if curve < -1:
+        curve = -1
+
+    return curve, imgWarpPoints, imgWarp, imgHist
 
 def adjust_steering(offset):
     """ Adjust steering and only send if it changes. """
@@ -77,22 +87,26 @@ while True:
         print("Error: Unable to read frame.")
         break
 
-    frame_width = frame.shape[1]
+    # Resize frame and send to GPU processing
+    frame = cv2.resize(frame, (480, 240))
+    
+    # Get lane curve and process the frame
+    curve, imgWarpPoints, imgWarp, imgHist = process_frame_gpu(frame)
+    print(f"curve = {curve}")
 
-    edge_img = process_frame_gpu(frame)
+    # Adjust steering based on detected lane curve
+    offset = np.mean(np.where(imgHist > 0)[1]) - (frame.shape[1] / 2) if np.any(imgHist > 0) else None
+    adjust_steering(offset)
 
-    # Display video output
-    cv2.imshow("Lane Detection (GPU)", edge_img)
+    # Show full pipeline with all steps
+    imgStacked = utlis.stackImages(0.7, ([frame, imgWarpPoints, imgWarp], [imgHist, imgHist, imgHist]))
+    cv2.imshow("Lane Detection (GPU)", imgStacked)
 
-    # Only check for steering if there are edges
-    if edge_img is not None:
-        offset = np.mean(np.where(edge_img > 0)[1]) - (frame_width / 2) if np.any(edge_img > 0) else None
-        adjust_steering(offset)
-
-    if cv2.waitKey(1) & 0xFF == ord("q"):
+    if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
 cap.release()
 cv2.destroyAllWindows()
+
 if arduino:
     arduino.close()
