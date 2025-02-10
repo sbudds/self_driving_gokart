@@ -31,19 +31,50 @@ def gpu_image_transform_pil(pil_img):
 
 def gpu_process_output(output, cfg):
     """
-    Process the lane detector output entirely on GPU.
-    This function mimics the original post-processing:
-      - Flips the tensor,
-      - Applies softmax,
-      - Computes a weighted sum over lane grid indices.
+    Process the lane detector model's output on the GPU and then return
+    lanes_points and lanes_detected as expected by the rest of the code.
     """
-    processed_output = torch.flip(output[0], dims=[1])
-    prob = torch.nn.functional.softmax(processed_output[:-1, :, :], dim=0)
-    idx = (torch.arange(cfg.griding_num, device=processed_output.device).float() + 1.0).view(-1, 1, 1)
-    loc = torch.sum(prob * idx, dim=0)
-    argmax_output = torch.argmax(processed_output, dim=0)
-    loc[argmax_output == cfg.griding_num] = 0
-    return loc
+    with torch.no_grad():
+        # Flip along the row dimension.
+        processed_output = torch.flip(output[0], dims=[1])
+        # Apply softmax along the first channel dimension (excluding the last row)
+        prob = torch.nn.functional.softmax(processed_output[:-1, :, :], dim=0)
+        # Create an index tensor [1,2,...,griding_num] on GPU
+        idx = (torch.arange(cfg.griding_num, device=processed_output.device).float() + 1.0).view(-1, 1, 1)
+        # Compute a weighted sum.
+        loc = torch.sum(prob * idx, dim=0)
+        # Get the argmax along the channel dimension.
+        argmax_output = torch.argmax(processed_output, dim=0)
+        loc[argmax_output == cfg.griding_num] = 0
+
+    # Transfer the resulting tensor to CPU as a NumPy array for light post‑processing.
+    processed_output_np = loc.cpu().numpy()
+
+    # Continue with post‑processing as in the original code.
+    col_sample = np.linspace(0, 800 - 1, cfg.griding_num)
+    col_sample_w = col_sample[1] - col_sample[0]
+
+    lanes_points = []
+    lanes_detected = []
+    max_lanes = processed_output_np.shape[1]
+    for lane_num in range(max_lanes):
+        lane_points = []
+        # If there are enough nonzero points in the lane, mark it as detected.
+        if np.sum(processed_output_np[:, lane_num] != 0) > 2:
+            lanes_detected.append(True)
+            for point_num in range(processed_output_np.shape[0]):
+                if processed_output_np[point_num, lane_num] > 0:
+                    lane_point = [
+                        int(processed_output_np[point_num, lane_num] * col_sample_w * cfg.img_w / 800) - 1,
+                        int(cfg.img_h * (cfg.row_anchor[cfg.cls_num_per_lane - 1 - point_num] / 288)) - 1
+                    ]
+                    lane_points.append(lane_point)
+        else:
+            lanes_detected.append(False)
+        lanes_points.append(lane_points)
+
+    return lanes_points, np.array(lanes_detected)
+
 
 ###########################
 # PID CONTROLLER (Lightweight)
