@@ -28,7 +28,9 @@ def control_steering(arduino, command):
     command: a string representing the servo angle ("80", "105", or "130").
     """
     arduino.write(command.encode())  # Send the command to Arduino
+    arduino.write(b'\n')  # Add newline for Arduino to detect end of command
     print(f"Sent steering command: {command}")
+    time.sleep(0.2)  # Small delay to ensure Arduino receives and processes the command
 
 # Set up video capture and Arduino connection.
 cap = cv2.VideoCapture(0)
