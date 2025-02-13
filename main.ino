@@ -47,6 +47,6 @@ void loop() {
       Serial.println("Motor running");
     }
 
-    }
+    
   }
 }
