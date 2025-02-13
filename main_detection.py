@@ -1,6 +1,5 @@
 import cv2
 import numpy as np
-import utils
 import Jetson.GPIO as GPIO
 import time
 
@@ -26,34 +25,80 @@ def set_steering_angle(angle):
     time.sleep(0.1)
     servo.ChangeDutyCycle(0)  # Stop sending PWM signal after setting angle
 
-def getLaneCurve(img, display=2):
-    imgThres = utils.thresholding(img)
+def thresholding(img):
+    """Apply grayscale, Gaussian blur, and adaptive thresholding."""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    thresh = cv2.adaptiveThreshold(blurred, 255,
+                                   cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                   cv2.THRESH_BINARY, 11, 2)
+    return thresh
+
+def warpImg(img, points, wT, hT):
+    """Apply perspective transformation to warp the image."""
+    src = np.float32(points)
+    dst = np.float32([[0, 0], [wT, 0], [0, hT], [wT, hT]])
+    matrix = cv2.getPerspectiveTransform(src, dst)
+    imgWarp = cv2.warpPerspective(img, matrix, (wT, hT))
+    return imgWarp
+
+def getHistogram(imgWarp):
+    """Compute the histogram to find the lane center."""
+    histValues = np.sum(imgWarp[imgWarp.shape[0]//2:, :], axis=0)  # Sum pixel values in lower half
+    midpoint = len(histValues) // 2
+    left_sum = np.sum(histValues[:midpoint])
+    right_sum = np.sum(histValues[midpoint:])
+    
+    # Determine lane center shift
+    if left_sum + right_sum > 0:
+        lane_center = np.argmax(histValues)  # Most prominent column
+    else:
+        lane_center = midpoint  # Default to center if no strong lane detected
+    
+    return lane_center
+
+def getLaneCurve(img):
+    """Process the image and determine lane deviation."""
+    imgThres = thresholding(img)
     hT, wT = img.shape[:2]
-    points = np.float32([(106, 111), (480-106, 111), (24, 223), (480-24, 223)])
-    imgWarp = utils.warpImg(imgThres, points, wT, hT)
-    RoadCenter, _ = utils.getHistogram(imgWarp, display=False, minPer=0.5, region=4)
+    points = np.float32([(106, 111), (wT-106, 111), (24, 223), (wT-24, 223)])
+    imgWarp = warpImg(imgThres, points, wT, hT)
+    RoadCenter = getHistogram(imgWarp)
     imgCenter = wT // 2
     dist = RoadCenter - imgCenter
     return dist
 
 def compute_steering_angle(dist):
+    """Map distance deviation to steering angle."""
     max_dist = 120  # Tuning parameter for sensitivity
     k = (RIGHT_ANGLE - LEFT_ANGLE) / (2 * max_dist)
     angle = CENTER_ANGLE + k * dist
     return max(min(angle, RIGHT_ANGLE), LEFT_ANGLE)
 
 if __name__ == '__main__':
-    cap = cv2.VideoCapture("video.mp4")
-    while cap.isOpened():  
+    # To use a video file instead of the camera,
+    # uncomment the following line and comment out the camera line:
+    cap = cv2.VideoCapture("/home/soumi/Downloads/IMG_0955.mp4")
+    
+    # cap = cv2.VideoCapture(0, cv2.CAP_V4L2)  # Use camera
+
+    while cap.isOpened():
         ret, img = cap.read()
         if not ret:
             break
+
         img = cv2.resize(img, (480, 240))
-        dist = getLaneCurve(img, display=2)
+        
+        # To display the video footage, keep this line. Comment it out to disable the window.
+        cv2.imshow("Frame", img)
+
+        dist = getLaneCurve(img)
         steering_angle = compute_steering_angle(dist)
         set_steering_angle(steering_angle)
+
         if cv2.waitKey(1) == ord("q"):
             break
+
     cap.release()
     cv2.destroyAllWindows()
     servo.stop()
