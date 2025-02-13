@@ -15,22 +15,18 @@ except Exception as e:
     print(f"Error: Could not connect to Arduino on {SERIAL_PORT}: {e}")
     arduino = None
 
-# Load the YOLOv5 model with CUDA support
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"Using device: {device}")
 
 model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True).to(device)
 
-# Define target class
 TARGET_CLASSES = ['stop sign']
-last_detection_time = 0  # Tracks last detection time (seconds)
-
+last_detection_time = 0  
 def detect_stop_signs(frame):
     global last_detection_time
 
-    current_time = time.time()  # Get current time
+    current_time = time.time()  
 
-    # Ignore detection if it's within 5 seconds of the last one
     if current_time - last_detection_time < 5:
         return  
 
