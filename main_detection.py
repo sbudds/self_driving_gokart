@@ -15,6 +15,10 @@ CENTER_ANGLE = 115
 LEFT_ANGLE = 90
 RIGHT_ANGLE = 140
 
+# Smoothing and compensation parameters
+smoothing_factor = 0.2       # 0: no update, 1: instant update; lower means smoother
+compensation_factor = 0.1    # 10% reduction in deviation from center
+
 # Convert angle to duty cycle
 def angle_to_duty_cycle(angle):
     return (angle / 18.0) + 2.5
@@ -82,6 +86,8 @@ if __name__ == '__main__':
     
     # cap = cv2.VideoCapture(0, cv2.CAP_V4L2)  # Use camera
 
+    prev_angle = CENTER_ANGLE  # Initialize with the center angle
+    
     while cap.isOpened():
         ret, img = cap.read()
         if not ret:
@@ -89,12 +95,22 @@ if __name__ == '__main__':
 
         img = cv2.resize(img, (480, 240))
         
-        # To display the video footage, keep this line. Comment it out to disable the window.
+        # Display the current frame (optional)
         cv2.imshow("Frame", img)
-
+        
+        # Calculate lane deviation and raw steering angle
         dist = getLaneCurve(img)
-        steering_angle = compute_steering_angle(dist)
-        set_steering_angle(steering_angle)
+        raw_angle = compute_steering_angle(dist)
+        
+        # Apply compensation to delay turning (reduce deviation from center)
+        corrected_angle = CENTER_ANGLE + (raw_angle - CENTER_ANGLE) * (1 - compensation_factor)
+        
+        # Smooth the steering angle using a weighted average with the previous angle
+        smoothed_angle = prev_angle * (1 - smoothing_factor) + corrected_angle * smoothing_factor
+        prev_angle = smoothed_angle  # Update for next iteration
+        
+        # Set the servo to the smoothed steering angle
+        set_steering_angle(smoothed_angle)
 
         if cv2.waitKey(1) == ord("q"):
             break
