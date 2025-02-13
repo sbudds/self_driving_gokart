@@ -1,101 +1,60 @@
 import cv2
-import torch
-import serial
+import numpy as np
+import utils
+import Jetson.GPIO as GPIO
 import time
 
-from ultrafastLaneDetector import UltrafastLaneDetector, ModelType
+# Set up GPIO for servo control
+SERVO_PIN = 33
+GPIO.setmode(GPIO.BOARD)
+GPIO.setup(SERVO_PIN, GPIO.OUT)
+servo = GPIO.PWM(SERVO_PIN, 50)  # 50Hz PWM frequency
+servo.start(0)
 
-# Model paths and settings
-model_path = "lanes/models/tusimple_18.pth"
-model_type = ModelType.TUSIMPLE
-use_gpu = True 
-weights_only = True
+# Servo limits
+CENTER_ANGLE = 115
+LEFT_ANGLE = 90
+RIGHT_ANGLE = 140
 
-# Initialize lane detection model
-lane_detector = UltrafastLaneDetector(model_path, model_type, use_gpu)
+# Convert angle to duty cycle
+def angle_to_duty_cycle(angle):
+    return (angle / 18.0) + 2.5
 
-# Initialize Arduino serial connection
-SERIAL_PORT = '/dev/ttyACM0'  # Update with the correct port
-BAUD_RATE = 9600
+def set_steering_angle(angle):
+    duty_cycle = angle_to_duty_cycle(angle)
+    servo.ChangeDutyCycle(duty_cycle)
+    time.sleep(0.1)
+    servo.ChangeDutyCycle(0)  # Stop sending PWM signal after setting angle
 
-try:
-    arduino = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-    time.sleep(4)
-    print(f"Connected to Arduino on {SERIAL_PORT}")
-except Exception as e:
-    print(f"Error: Could not connect to Arduino on {SERIAL_PORT}: {e}")
-    arduino = None
+def getLaneCurve(img, display=2):
+    imgThres = utils.thresholding(img)
+    hT, wT = img.shape[:2]
+    points = np.float32([(106, 111), (480-106, 111), (24, 223), (480-24, 223)])
+    imgWarp = utils.warpImg(imgThres, points, wT, hT)
+    RoadCenter, _ = utils.getHistogram(imgWarp, display=False, minPer=0.5, region=4)
+    imgCenter = wT // 2
+    dist = RoadCenter - imgCenter
+    return dist
 
-# Load the YOLOv5 model with CUDA support
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-print(f"Using device: {device}")
+def compute_steering_angle(dist):
+    max_dist = 120  # Tuning parameter for sensitivity
+    k = (RIGHT_ANGLE - LEFT_ANGLE) / (2 * max_dist)
+    angle = CENTER_ANGLE + k * dist
+    return max(min(angle, RIGHT_ANGLE), LEFT_ANGLE)
 
-model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True).to(device)
-
-# Define target class
-TARGET_CLASSES = ['stop sign']
-last_detection_time = 0  # Tracks last detection time (seconds)
-
-def detect_stop_signs(frame):
-    global last_detection_time
-    current_time = time.time()
-    
-    if current_time - last_detection_time < 5:
-        return frame  # Skip detection if within 5 seconds of last one
-    
-    resized_frame = cv2.resize(frame, (540, 260))
-    rgb_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
-    results = model(rgb_frame)
-    detections = results.xyxy[0]
-    
-    for *box, confidence, cls in detections:
-        class_name = results.names[int(cls)]
-        if class_name in TARGET_CLASSES:
-            x_min, y_min, x_max, y_max = map(int, box)
-            cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
-            cv2.putText(frame, f"{class_name} ({confidence:.2f})", (x_min, y_min - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-            print(f"Stop sign detected with confidence: {confidence:.2f}")
-            
-            if arduino:
-                try:
-                    arduino.write(b'STOP\n')
-                    print("Signal sent to Arduino: STOP")
-                    time.sleep(2)  
-                    arduino.write(b'GO\n')
-                    print("Signal sent to Arduino: GO")
-                    last_detection_time = time.time()
-                except Exception as e:
-                    print(f"Error sending signal to Arduino: {e}")
+if __name__ == '__main__':
+    cap = cv2.VideoCapture("video.mp4")
+    while cap.isOpened():  
+        ret, img = cap.read()
+        if not ret:
             break
-    
-    return frame
-
-# Initialize video capture
-cap = cv2.VideoCapture(0)
-cv2.namedWindow("Lane & Stop Sign Detection", cv2.WINDOW_NORMAL)
-
-print("Processing video input... (Press 'q' to quit)")
-
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        print("Error: Unable to read frame.")
-        break
-    
-    # Detect lanes
-    lanes_frame = lane_detector.detect_lanes(frame)
-    
-    # Detect stop signs
-    output_frame = detect_stop_signs(lanes_frame)
-    
-    # Display results
-    cv2.imshow("Lane & Stop Sign Detection", output_frame)
-    
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-cap.release()
-cv2.destroyAllWindows()
-if arduino:
-    arduino.close()
+        img = cv2.resize(img, (480, 240))
+        dist = getLaneCurve(img, display=2)
+        steering_angle = compute_steering_angle(dist)
+        set_steering_angle(steering_angle)
+        if cv2.waitKey(1) == ord("q"):
+            break
+    cap.release()
+    cv2.destroyAllWindows()
+    servo.stop()
+    GPIO.cleanup()
