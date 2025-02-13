@@ -53,8 +53,9 @@ The RC car leverages the following components:
    pip install -r requirements.txt
    ```
 3. **Copy the Python Scripts**:
-   - git clone https://github.com/sbudds/self_driving_rc-car.git
-
+   ```bash
+   git clone https://github.com/sbudds/self_driving_rc-car.git
+   ```
 ### 2. Setting Up the Arduino
 
 1. **Hardware Connections**:
