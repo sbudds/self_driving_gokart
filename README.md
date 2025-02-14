@@ -94,4 +94,4 @@ This project is open-source and available under the [MIT License](LICENSE).
 
 ---
 
-This README now reflects the integrated nature of the project, highlights the NVIDIA Jetson platform for image processing and servo control, and maintains the communication with an Arduino for motor control. Enjoy building your self-driving RC car!
+
