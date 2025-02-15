@@ -25,7 +25,10 @@ The RC car leverages the following components:
 - Servo Control: Updates the servo if the angle change exceeds a threshold.
 
 ## stop_signs.py Code Functionality
-
+- Setup: Initializes the serial connection to the Arduino and loads the YOLOv5 model on GPU (if available).
+- Video Capture: Reads frames from the camera for real-time processing.
+- Stop Sign Detection: Resizes and converts frames to RGB, then runs YOLOv5 to identify stop signs.
+- Arduino Control: If a stop sign is detected, it sends a "STOP" signal to the Arduino, waits, then sends a "GO" signal.
 
 ## Requirements
 
