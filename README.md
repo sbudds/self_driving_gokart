@@ -35,7 +35,7 @@ The RC car leverages the following components:
 - Arduino IDE
 - OpenCV 
 - Pytorch
-  *be sure to install with CUDA based on your machine for optimal performance!
+*be sure to install with CUDA based on your machine for optimal performance!
 
 ## Setup and Usage
 
