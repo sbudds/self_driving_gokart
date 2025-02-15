@@ -30,11 +30,12 @@ The RC car leverages the following components:
 ### Software
 
 - Python 3
-- OpenCV with CUDA
-- PyTorch
 - YOLOv5 model
 - Jetson.GPIO library
 - Arduino IDE
+- OpenCV 
+- Pytorch
+  *be sure to install with CUDA based on your machine for optimal performance!
 
 ## Setup and Usage
 
