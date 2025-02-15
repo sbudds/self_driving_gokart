@@ -40,8 +40,8 @@ The RC car leverages the following components:
 
 ### 1. Setting Up the NVIDIA Jetson
 
-1. **Install Python 3 and Required Libraries**:
-   You may need to use different steps to build OpenCV and PyTorch with CUDA for your machine.
+1. **Install Python 3 and Required Libraries**
+   (You may need to use different steps to build OpenCV and PyTorch with CUDA for your machine):
    ```bash
    sudo apt update
    sudo apt install python3 python3-pip
