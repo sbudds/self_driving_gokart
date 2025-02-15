@@ -80,13 +80,13 @@ The RC car leverages the following components:
    - The system processes the video feed to perform lane detection and compute the steering angle.
    - Simultaneously, it detects stop signs using YOLOv5.
    - The calculated steering angle controls the servo motor via the Jetson’s GPIO.
-   - Upon detecting a stop sign, the system sends a `STOP` command to the Arduino to halt the motor. After a short delay, a `GO` command is sent to resume operation.
+   - Upon detecting a stop sign, the system sends a `STOP` command to the Arduino to halt the motor. 
    - Press `q` in the display window to exit the program.
 
 ### 5. Arduino Motor Control
 
 - **Normal Operation**: The motor runs continuously.
-- **Stop Sign Detected**: When a `STOP` command is received from the Jetson, the Arduino halts the motor until a `GO` command is received.
+- **Stop Sign Detected**: Reacts to signals sent from NVIDIA Jetson 
   
 ## License
 
