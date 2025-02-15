@@ -35,25 +35,25 @@ The RC car leverages the following components:
 - Arduino IDE
 - OpenCV 
 - Pytorch
-*be sure to install with CUDA based on your machine for optimal performance!
-
+  
 ## Setup and Usage
 
 ### 1. Setting Up the NVIDIA Jetson
 
 1. **Install Python 3 and Required Libraries**:
+   You may need to use different steps to build OpenCV and PyTorch with CUDA for your machine.
    ```bash
    sudo apt update
    sudo apt install python3 python3-pip
    pip3 install opencv-python torch torchvision jetson-gpio
    ```
-2. **Clone the YOLOv5 Repository**:
+3. **Clone the YOLOv5 Repository**:
    ```bash
    git clone https://github.com/ultralytics/yolov5.git
    cd yolov5
    pip install -r requirements.txt
    ```
-3. **Copy the Python Scripts**:
+4. **Copy the Python Scripts**:
    ```bash
    git clone https://github.com/sbudds/self_driving_rc-car.git
    ```
