@@ -16,6 +16,15 @@ The RC car leverages the following components:
 - **Integrated Single Video Feed Processing**: Both lane detection and stop sign detection are performed on the same video stream.
 - **Serial Communication**: The Jetson communicates with the Arduino via USB to send motor control commands.
 
+## Lane Line Code Functionality
+- Preprocessing: Converts to grayscale, applies blur, thresholding, and smoothing.
+- Perspective Warp: Transforms the image to a bird’s-eye view.
+- Lane Detection: Finds lane edges using histograms.
+- Deviation Calculation: Determines lane center offset from the image center.
+- Steering Adjustment: Maps deviation to a steering angle with smoothing.
+- Servo Control: Updates the servo if the angle change exceeds a threshold.
+
+
 ## Requirements
 
 ### Hardware
