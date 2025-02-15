@@ -24,6 +24,8 @@ The RC car leverages the following components:
 - Steering Adjustment: Maps deviation to a steering angle with smoothing.
 - Servo Control: Updates the servo if the angle change exceeds a threshold.
 
+## stop_signs.py Code Functionality
+
 
 ## Requirements
 
