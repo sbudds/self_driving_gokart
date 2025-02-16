@@ -4,7 +4,7 @@ This project is a self-driving RC car that uses an NVIDIA Jetson for image proce
 
 ## Overview
 
-The RC car leverages the following components:
+The RC car uses the following:
 - **YOLOv5 and OpenCV**: Used for detecting stop signs and lane lines in the video feed captured by a USB camera.
 - **NVIDIA Jetson**: Processes the video feed to perform lane detection and stop sign detection, and directly controls a steering servo via the Jetson.GPIO library.
 - **Arduino**: Controls the motor via an L298N motor driver. The Arduino receives commands from the Jetson when a stop sign is detected.
