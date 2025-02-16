@@ -18,7 +18,7 @@ The RC car uses the following:
 
 ## lane_lines.py Code Functionality
 - Preprocessing: Converts to grayscale, applies blur, thresholding, and smoothing.
-- Perspective Warp: Transforms the image to adjust for warp and camera angle
+- Perspective Warp: Transforms the image to adjust for warp and camera angle.
 - Lane Detection: Finds lane edges using histograms.
 - Deviation Calculation: Determines lane center offset from the image center.
 - Steering Adjustment: Maps deviation to a steering angle with smoothing.
