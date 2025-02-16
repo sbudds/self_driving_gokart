@@ -34,12 +34,12 @@ The RC car leverages the following components:
 
 ### Hardware
 
-- **NVIDIA Jetson** 
-- **Arduino Uno**
-- **L298N Motor Driver** 
-- **Steering Servo Motor**
-- **USB Camera**
-- **RC Car Chassis with Wheels**
+- NVIDIA Jetson
+- Arduino Uno
+- L298N Motor Driver
+- SG90 Servo Motor
+- Camera
+- RC Car Chassis with Wheels and Drive Motor(s)
 
 ### Software
 
