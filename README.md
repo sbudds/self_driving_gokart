@@ -45,7 +45,6 @@ The RC car leverages the following components:
 
 - Python 3
 - YOLOv5 model
-- Jetson.GPIO library
 - Arduino IDE
 - OpenCV 
 - Pytorch
